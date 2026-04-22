@@ -1,0 +1,214 @@
+C251 COMPILER V5.60.0,  pid                                                                22/04/26  16:39:19  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE pid
+OBJECT MODULE PLACED IN .\out_file\pid.obj
+COMPILER INVOKED BY: D:\keil\C251\BIN\C251.EXE pid.c LARGE FLOAT64 ROM(HUGE) WARNINGLEVEL(3) OPTIMIZE(0,SIZE) BROWSE INC
+                    -DIR(..\..\libraries\zf_common;..\..\libraries\zf_components;..\..\libraries\zf_device;..\..\libraries\zf_driver;..\user;
+                    -..\code;..\..\libraries\zf_components\stc32g_usb_lib;..\..\libraries\zf_components\seekfree_assistant) DEBUG PRINT(.\out
+                    -_file\pid.lst) TABS(2) OBJECT(.\out_file\pid.obj) 
+
+stmt  level    source
+
+    1          /*
+    2           * pid.c
+    3           *
+    4           *  Created on: 2025年1月15日
+    5           *      Author: j1912
+    6           */
+    7          #include "pid.h"
+    8          #include <stdio.h>
+    9          #include <math.h>
+   10          //首先定义PID结构体用于存放一个PID的数据
+   11          #define BASE_SPEED  20
+   12          PID left_motor_speedpid = {0};             //创建一个PID结构体变量
+   13          PID right_motor_speedpid = {0};            //创建一个PID结构体变量
+   14          PID positionpid = {0};                     //创建一个PID结构体变量
+   15          //用于初始化pid参数的函数
+   16          void PID_Init(PID *pid, float p, float i, float d, int maxI, int maxOut)
+   17          {
+   18   1          pid->kp = p;
+   19   1          pid->ki = i;
+   20   1          pid->kd = d;
+   21   1          pid->maxIntegral = maxI;
+   22   1          pid->maxOutput = maxOut;
+   23   1      }
+   24          
+   25          //进行一次pid计算
+   26          //参数为(pid结构体,目标值,反馈值)，计算结果放在pid结构体的output成员中
+   27          void PID_Calc(PID *pid, int reference, int feedback)
+   28          {
+   29   1          int dout;
+   30   1          int pout;
+   31   1      
+   32   1          //更新数据
+   33   1          pid->lastError = pid->error; //将旧error存起来
+   34   1          pid->error = reference - feedback; //计算新error
+   35   1        
+   36   1      
+   37   1          
+   38   1          //计算微分 (现在只赋值，不声明)
+   39   1          dout = (pid->error - pid->lastError) * pid->kd;
+   40   1          
+   41   1          //计算比例 (现在只赋值，不声明)
+   42   1          pout = pid->error * pid->kp;
+   43   1          
+   44   1          //计算积分
+   45   1          pid->integral += pid->error * pid->ki;
+   46   1          
+   47   1          //积分限幅
+   48   1          if(pid->integral > pid->maxIntegral) pid->integral = pid->maxIntegral;
+   49   1          else if(pid->integral < -pid->maxIntegral) pid->integral = -pid->maxIntegral;
+   50   1          
+   51   1          //计算输出
+   52   1          pid->output = pout + dout + pid->integral;
+   53   1          //输出限幅
+   54   1          if(pid->output > pid->maxOutput) pid->output =   pid->maxOutput;
+   55   1          else if(pid->output < -pid->maxOutput) pid->output = -pid->maxOutput;
+   56   1      }
+C251 COMPILER V5.60.0,  pid                                                                22/04/26  16:39:19  PAGE 2   
+
+   57          //-------------------------------------------------------------------------------------------------------
+             -------------
+   58          // 函数简介     左电机pid初始化
+   59          // 参数说明     void
+   60          // 返回参数     void
+   61          //-------------------------------------------------------------------------------------------------------
+             -------------
+   62          
+   63          void left_motor_speed_pid_init(float p, float i, float d, int maxI, int maxOut)
+   64          {
+   65   1          PID_Init(&left_motor_speedpid,p,i,d,maxI,maxOut);
+   66   1      }
+   67          
+   68          //-------------------------------------------------------------------------------------------------------
+             -------------
+   69          // 函数简介     右电机pid初始化
+   70          // 参数说明     void
+   71          // 返回参数     void
+   72          //-------------------------------------------------------------------------------------------------------
+             -------------
+   73          
+   74          void right_motor_speed_pid_init(float p, float i, float d, int maxI, int maxOut)
+   75          {
+   76   1          PID_Init(&right_motor_speedpid,p,i,d,maxI,maxOut);
+   77   1      }
+   78          
+   79          //-------------------------------------------------------------------------------------------------------
+             -------------
+   80          // 函数简介     计算左电机pid
+   81          // 参数说明     void
+   82          // 返回参数     void
+   83          //-------------------------------------------------------------------------------------------------------
+             -------------
+   84          
+   85          void left_motor_speed_pid_calc( int speed, int speed_fd)
+   86          {
+   87   1          PID_Calc(&left_motor_speedpid,speed,speed_fd);
+   88   1          //left_motor_control(left_motor_speedpid.output);
+   89   1          //printf("%d",left_motor_speedpid.output_integral);
+   90   1      }
+   91          //-------------------------------------------------------------------------------------------------------
+             -------------
+   92          // 函数简介     计算右电机pid
+   93          // 参数说明     void
+   94          // 返回参数     void
+   95          //-------------------------------------------------------------------------------------------------------
+             -------------
+   96          
+   97          void right_motor_speed_pid_calc( int speed, int speed_fd)
+   98          {
+   99   1          PID_Calc(&right_motor_speedpid,speed,speed_fd);
+  100   1          //right_motor_control(right_motor_speedpid.output);
+  101   1      }
+  102          //-------------------------------------------------------------------------------------------------------
+             -------------
+  103          // 函数简介     初始化位置pid
+  104          // 参数说明     void
+  105          // 返回参数     void
+  106          //-------------------------------------------------------------------------------------------------------
+             -------------
+  107          
+  108          void position_pid_init(float p, float i, float d, int maxI, int maxOut)
+  109          {
+  110   1          PID_Init(&positionpid,p,i,d,maxI,maxOut);
+  111   1      }
+  112          
+C251 COMPILER V5.60.0,  pid                                                                22/04/26  16:39:19  PAGE 3   
+
+  113          //int error ,last_error;
+  114          //extern volatile int16_t my_Mid_Line[MT9V03X_H];
+  115          //volatile int16_t count_mid_point;
+  116          ////-----------------------------------------------------------------------------------------------------
+             ---------------
+  117          //// 函数简介     位置pid,通过中线偏差得到error,并给出差速，最终这个函数在encoder.c中调用
+  118          //// 参数说明     void
+  119          //// 返回参数     void
+  120          ////-----------------------------------------------------------------------------------------------------
+             ---------------
+  121          
+  122          //void position_pid_calc(void)
+  123          //{
+  124          //    error = 0;
+  125          //    if(count_mid_point>60) count_mid_point=60;
+  126          //    if(count_mid_point >=10)
+  127          //    {
+  128          //        for(int i=0;i<count_mid_point;i++)
+  129          //        {
+  130          //          error += (94-my_Mid_Line[i]);
+  131          //        }
+  132          //        error = error/count_mid_point;
+  133          //        last_error = error;
+  134          //    }
+  135          //    else
+  136          //    {
+  137          //        error = last_error;
+  138          //    }
+  139          //    position_pid_init((pow(abs(error)/10.0,3)),0,pow(abs(error)/10.0,4),0,BASE_SPEED);                 
+             -                  //位置pid初始化
+  140          //    PID_Calc(&positionpid,error,0);
+  141          //    if(positionpid.output < 0)                  //误差小于0右转
+  142          //    {
+  143          //        left_motor_speed_pid_calc(BASE_SPEED+abs(positionpid.output),encoder_data_2);
+  144          //        right_motor_speed_pid_calc(BASE_SPEED-abs(positionpid.output),encoder_data_4);
+  145          ////        right_motor_speed_pid_calc(200,encoder_data_4);
+  146          //    }
+  147          //    else if(positionpid.output > 0)                  //误差大于0左转
+  148          //    {
+  149          ////        left_motor_speed_pid_calc(200,encoder_data_2);
+  150          //        left_motor_speed_pid_calc(BASE_SPEED-abs(positionpid.output),encoder_data_2);
+  151          //        right_motor_speed_pid_calc(BASE_SPEED+abs(positionpid.output),encoder_data_4);
+  152          //    }
+  153          //    else
+  154          //    {
+  155          //        left_motor_speed_pid_calc(BASE_SPEED,encoder_data_2);
+  156          //        right_motor_speed_pid_calc(BASE_SPEED,encoder_data_4);
+  157          //    }
+  158          
+  159          //}
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =    ------     ------
+  ecode size           =      1348     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =       208     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+C251 COMPILER V5.60.0,  pid                                                                22/04/26  16:39:19  PAGE 4   
+
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =       135     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,58 @@
+C251 COMPILER V5.60.0,  servo                                                              22/04/26  16:39:19  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE servo
+OBJECT MODULE PLACED IN .\out_file\servo.obj
+COMPILER INVOKED BY: D:\keil\C251\BIN\C251.EXE servo.c LARGE FLOAT64 ROM(HUGE) WARNINGLEVEL(3) OPTIMIZE(0,SIZE) BROWSE I
+                    -NCDIR(..\..\libraries\zf_common;..\..\libraries\zf_components;..\..\libraries\zf_device;..\..\libraries\zf_driver;..\use
+                    -r;..\code;..\..\libraries\zf_components\stc32g_usb_lib;..\..\libraries\zf_components\seekfree_assistant) DEBUG PRINT(.\o
+                    -ut_file\servo.lst) TABS(2) OBJECT(.\out_file\servo.obj) 
+
+stmt  level    source
+
+    1          #include "servo.h"
+    2          
+    3          // 舵机初始化
+    4          void servo_init(void)
+    5          {
+    6   1          // 初始化 PWM 引脚，初始占空比给 0，防止上电乱抽
+    7   1          pwm_init(SERVO_PWM_PIN, SERVO_FREQ, 0); 
+    8   1          
+    9   1          // 初始化完成后，先让舵机回到中位
+   10   1          servo_set_angle(SERVO_CENTER);
+   11   1      }
+   12          
+   13          // 舵机角度控制函数 (带限幅保护)
+   14          void servo_set_angle(float angle)
+   15          {
+   16   1          // 软件限幅，防止打角过大损坏机械拉杆或烧毁舵机
+   17   1          if(angle > SERVO_R_MAX) angle = SERVO_R_MAX;
+   18   1          if(angle < SERVO_L_MAX) angle = SERVO_L_MAX;
+   19   1          
+   20   1          // 计算并输出对应角度的 PWM 占空比
+   21   1          pwm_set_duty(SERVO_PWM_PIN, (uint32)SERVO_DUTY(angle));
+   22   1      }
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =    ------     ------
+  ecode size           =       182     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =         4     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =    ------     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,1398 @@
+﻿   1: #include "camera.h"
+   2: #include "zf_common_headfile.h"
+   3: #include <math.h>
+   4: 
+   5: /* ===================== 全局变量 ===================== */
+   6: uint8 buff[2];
+   7: uint8 img_threshold;
+   8: uint8 left_jidian;
+   9: uint8 right_jidian;
+  10: 
+  11: static uint8 bin_image[MT9V03X_H][MT9V03X_W];
+  12: 
+  13: uint8 left_line_list[MT9V03X_H];
+  14: uint8 right_line_list[MT9V03X_H];
+  15: uint8 mid_line_list[MT9V03X_H];
+  16: uint8 left_line_raw[MT9V03X_H];
+  17: 
+  18: #define CAM_H     30.0f
+  19: #define CAM_F     80.0f
+  20: #define VANISH_Y  10.0f
+  21: 
+  22: /* ===================== 环岛/特征点专用变量 ===================== */
+  23: uint16 pt_down_x = 0, pt_down_y = 0;  /* A点(下拐点)坐标 */
+  24: uint16 pt_mid_x = 0,  pt_mid_y = 0;   /* B点(中拐点)坐标 - 预留 */
+  25: uint16 pt_up_x = 0,   pt_up_y = 0;    /* C点(上拐点)坐标 - 预留 */
+  26: uint16 exit_pt_x = 0;
+  27: uint16 exit_pt_y = 0;
+  28: uint8  island_dir = 0;                /* 0:无, 1:左环, 2:右环 */
+  29: uint8  roundabout_state = 0;          /* 环岛状态机步骤 */
+  30: uint16 delay_cnt = 0;                 /* 状态切换延时计数器 - 预留 */
+  31: 
+  32: typedef enum {
+  33:     R_NONE     = 0, // 直行或普通弯道
+  34:     R_IN_PATCH = 1, // 发现 AB 点，开始入环补线
+  35:     R_A_LOST   = 2  // A 点消失，依靠 BC 斜率补线
+  36: } RState_e;
+  37: 
+  38: /* ===================== 八邻域专用变量 ===================== */
+  39: // 8个搜索方向: 0上, 1右上, 2右, 3右下, 4下, 5左下, 6左, 7左上
+  40: const int8 dir_x[8] = { 0,  1,  1,  1,  0, -1, -1, -1};
+  41: const int8 dir_y[8] = {-1, -1,  0,  1,  1,  1,  0, -1};
+  42: 
+  43: // 存储八邻域爬行得到的点集（兼容北海玄风/乾勤算法）
+  44: uint16 left_pts_x[MT9V03X_H * 3];
+  45: uint16 left_pts_y[MT9V03X_H * 3];
+  46: uint8  left_pts_dir[MT9V03X_H * 3]; // 存储生长方向
+  47: uint16 left_pts_cnt = 0;
+  48: 
+  49: uint16 right_pts_x[MT9V03X_H * 3];
+  50: uint16 right_pts_y[MT9V03X_H * 3];
+  51: uint8  right_pts_dir[MT9V03X_H * 3];
+  52: uint16 right_pts_cnt = 0;
+  53: 
+  54: /* ===================== 极速二值化宏定义 ===================== */
+  55: #define GET_THRESH(y)    ( (y < MT9V03X_H/3) ? (img_threshold + 20) : img_threshold )
+  56: 
+  57: /* 1. 基础单点判断 (保留给八邻域爬虫使用，保证走线的连贯性和灵活性) */
+  58: #define IS_WHITE(y, x)   ( mt9v03x_image[y][x] >= GET_THRESH(y) )
+  59: #define IS_BLACK(y, x)   ( mt9v03x_image[y][x] <  GET_THRESH(y) )
+  60: 
+  61: /* 2. 【方案二新增】：宏定义级抗噪滤波 (0资源消耗) 
+  62:    原理：要求当前点和旁边的点必须同时为同色，彻底无视单像素的白斑/黑点。 */
+  63: #define IS_WHITE_STABLE(y, x)  ( IS_WHITE(y, x) && IS_WHITE(y, (x)+1) )
+  64: #define IS_BLACK_STABLE(y, x)  ( IS_BLACK(y, x) && IS_BLACK(y, (x)-1) )
+  65: #define SAFE_MARGIN      5
+  66: 
+  67: 
+  68: volatile uint16 current_fps = 0;
+  69: volatile uint16 fps_counter = 0;
+  70: static uint8 skip = 0;
+  71: 
+  72: void mark_frame_processed(void) { fps_counter++; }
+  73: 
+  74: void my_fps_timer_callback(void)
+  75: {
+  76:     static uint16 time_ms = 0;
+  77:     time_ms++;
+  78:     if(time_ms >= 1000)
+  79:     {
+  80:         current_fps = fps_counter;
+  81:         fps_counter = 0;
+  82:         time_ms = 0;
+  83:     }
+  84: }
+  85: 
+  86: /* ===================== Ostu ===================== */
+  87: uint8 Ostu(void)
+  88: {
+  89:     uint16 hist[256] = {0};
+  90:     uint32 total, sum = 0, sumB = 0, wB = 0, wF = 0;
+  91:     float mB, mF, diff, between, maxBetween = -1.0f;
+  92:     uint8 threshold = 0;
+  93:     uint16 i, x, y;
+  94: 
+  95:     for(y = 0; y < MT9V03X_H; y += 2) {
+  96:         for(x = 0; x < MT9V03X_W; x += 2) {
+  97:             hist[mt9v03x_image[y][x]]++;
+  98:         }
+  99:     }
+ 100:     total = (MT9V03X_H / 2) * (MT9V03X_W / 2);
+ 101: 
+ 102:     for(i = 0; i < 256; i++) sum += (uint32)i * hist[i];
+ 103: 
+ 104:     for(i = 0; i < 256; i++) {
+ 105:         wB += hist[i];
+ 106:         if(wB == 0) continue;
+ 107:         wF = total - wB;
+ 108:         if(wF == 0) break;
+ 109: 
+ 110:         sumB += (uint32)i * hist[i];
+ 111:         mB = (float)sumB / wB;
+ 112:         mF = (float)(sum - sumB) / wF;
+ 113: 
+ 114:         diff = mB - mF;
+ 115:         between = (float)wB * (float)wF * diff * diff;
+ 116: 
+ 117:         if(between > maxBetween) {
+ 118:             maxBetween = between;
+ 119:             threshold = (uint8)i;
+ 120:         }
+ 121:     }
+ 122:     return threshold;
+ 123: }
+ 124: 
+ 125: static void make_binary_image(void)
+ 126: {
+ 127:     uint16 y, x;
+ 128:     for (y = 0; y < MT9V03X_H; y++) {
+ 129:         for (x = 0; x < MT9V03X_W; x++) {
+ 130:             bin_image[y][x] = IS_WHITE(y, x) ? 255 : 0;
+ 131:         }
+ 132:     }
+ 133: }
+ 134: 
+ 135: static uint8 u16_to_str(char *out, uint16 v)
+ 136: {
+ 137:     char tmp[6]; uint8 i = 0, len = 0;
+ 138:     if(v == 0) { out[0] = '0'; return 1; }
+ 139:     while(v && i < 5) { tmp[i++] = (char)('0' + (v % 10)); v /= 10; }
+ 140:     while(i) { out[len++] = tmp[--i]; }
+ 141:     return len;
+ 142: }
+ 143: 
+ 144: void send_left_right_ascii(uint16 left, uint16 right)
+ 145: {
+ 146:     char tx[32]; uint8 p = 0;
+ 147:     tx[p++] = 'L'; tx[p++] = '='; p += u16_to_str(&tx[p], left);
+ 148:     tx[p++] = ' '; tx[p++] = 'R'; tx[p++] = '='; p += u16_to_str(&tx[p], right);
+ 149:     tx[p++] = '\r'; tx[p++] = '\n';
+ 150:     wireless_uart_send_buffer((uint8*)tx, p);
+ 151: }
+ 152: 
+ 153: uint8 Limit_uint8(uint8 a,uint8 b, uint8 c)
+ 154: {
+ 155:     if((b>=a) && (b<=c)) return b;
+ 156:     else if(b<a) return a;
+ 157:     else if(b>c) return c;
+ 158:     return 0;
+ 159: }
+ 160: 
+ 161: /* ===================== 找基点 ===================== */
+ 162: void find_jidian(void)
+ 163: {
+ 164:     uint8 j;
+ 165:     uint16 y = jidian_search_line - 1;
+ 166: 
+ 167:     left_jidian = 1;
+ 168:     right_jidian = MT9V03X_W - 2;
+ 169: 
+ 170:     if(IS_WHITE(y, MT9V03X_W/2) && IS_WHITE(y, MT9V03X_W/2 + 1) && IS_WHITE(y, MT9V03X_W/2 - 1))
+ 171:     {
+ 172:         for(j=MT9V03X_W/2;j>0;j--) {
+ 173:             if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
+ 174:             if(j-1==1) { left_jidian=1; break; }
+ 175:         }
+ 176:         for(j=MT9V03X_W/2;j<MT9V03X_W-2;j++) {
+ 177:             if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
+ 178:             if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
+ 179:         }
+ 180:     }
+ 181:     else if(IS_WHITE(y, MT9V03X_W/4) && IS_WHITE(y, MT9V03X_W/4 + 1) && IS_WHITE(y, MT9V03X_W/4 - 1))
+ 182:     {
+ 183:         for(j=MT9V03X_W/4;j>0;j--) {
+ 184:             if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
+ 185:             if(j-1==1) { left_jidian=1; break; }
+ 186:         }
+ 187:         for(j=MT9V03X_W/4;j<MT9V03X_W-2;j++) {
+ 188:             if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
+ 189:             if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
+ 190:         }
+ 191:     }
+ 192:     else if(IS_WHITE(y, MT9V03X_W/4*3) && IS_WHITE(y, MT9V03X_W/4*3 + 1) && IS_WHITE(y, MT9V03X_W/4*3 - 1))
+ 193:     {
+ 194:         for(j=MT9V03X_W/4*3;j>0;j--) {
+ 195:             if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
+ 196:             if(j-1==1) { left_jidian=1; break; }
+ 197:         }
+ 198:         for(j=MT9V03X_W/4*3;j<MT9V03X_W-2;j++) {
+ 199:             if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
+ 200:             if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
+ 201:         }
+ 202:     }
+ 203: }
+ 204: 
+ 205: /* =======================================================================
+ 206:  * 八邻域边界跟踪算法 (8-Neighborhood Edge Tracking) - 防竖线修复版
+ 207:  * ======================================================================= */
+ 208: void image_deal(void)
+ 209: {
+ 210:     /* --- 1. 变量声明 (C89标准) --- */
+ 211:     int i;
+ 212:     int start_left_x, start_right_x, start_y;
+ 213:     int curr_x, curr_y, curr_dir;
+ 214:     int search_dir, found, start_search;
+ 215:     int nx, ny;
+ 216: 
+ 217:     /* --- 2. 初始化数组 --- */
+ 218:     for (i = 0; i < MT9V03X_H; i++) {
+ 219:         left_line_list[i] = 255;
+ 220:         right_line_list[i] = 255;
+ 221:         mid_line_list[i] = MID_W;
+ 222:     }
+ 223:     left_pts_cnt = 0;
+ 224:     right_pts_cnt = 0;
+ 225: 
+ 226:     /* --- 3. 获取起点 --- */
+ 227:     start_left_x = left_jidian;
+ 228:     start_right_x = right_jidian;
+ 229:     start_y = jidian_search_line - 1;
+ 230:     
+ 231:     if (start_left_x < 1) start_left_x = 1;
+ 232:     if (start_right_x > MT9V03X_W - 2) start_right_x = MT9V03X_W - 2;
+ 233: 
+ 234:     /* ---------------- 左边缘八邻域爬行 ---------------- */
+ 235:     curr_x = start_left_x;
+ 236:     curr_y = start_y;
+ 237:     curr_dir = 0; /* 初始方向：向上 */
+ 238: 
+ 239:     while (left_pts_cnt < MT9V03X_H * 3) {
+ 240:         /* 记录点集供高级算法使用 */
+ 241:         left_pts_x[left_pts_cnt] = curr_x;
+ 242:         left_pts_y[left_pts_cnt] = curr_y;
+ 243:         left_pts_dir[left_pts_cnt] = curr_dir;
+ 244:         left_pts_cnt++;
+ 245: 
+ 246:         /* 映射到一维数组 */
+ 247:         if (curr_y >= 0 && curr_y < MT9V03X_H) {
+ 248:             if (left_line_list[curr_y] == 255) {
+ 249:                 left_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+ 250:             }
+ 251:         }
+ 252: 
+ 253:         /* 只有到达图像顶端才结束爬行 */
+ 254:         if (curr_y <= search_end_line) break;
+ 255: 
+ 256:         /* 寻找下一个边缘点 (向左转90度开始，扫6个方向防止倒退) */
+ 257:         found = 0;
+ 258:         start_search = (curr_dir + 6) % 8; 
+ 259:         
+ 260:         for (i = 0; i < 6; i++) {
+ 261:             search_dir = (start_search + i) % 8; /* 顺时针扫 */
+ 262:             nx = curr_x + dir_x[search_dir];
+ 263:             ny = curr_y + dir_y[search_dir];
+ 264: 
+ 265:             /* 允许贴着屏幕边缘走，不触发 break */
+ 266:             if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
+ 267:                 if (IS_WHITE(ny, nx)) {
+ 268:                     curr_x = nx;
+ 269:                     curr_y = ny;
+ 270:                     curr_dir = search_dir;
+ 271:                     found = 1;
+ 272:                     break;
+ 273:                 }
+ 274:             }
+ 275:         }
+ 276:         
+ 277:         /* 【防呆机制】如果进入纯黑死胡同，强制向上走一步，防止死循环 */
+ 278:         if (!found) {
+ 279:             curr_y--;
+ 280:             curr_dir = 0;
+ 281:         }
+ 282:     }
+ 283: 
+ 284:     /* ---------------- 右边缘八邻域爬行 ---------------- */
+ 285:     curr_x = start_right_x;
+ 286:     curr_y = start_y;
+ 287:     curr_dir = 0; /* 初始方向：向上 */
+ 288: 
+ 289:     while (right_pts_cnt < MT9V03X_H * 3) {
+ 290:         right_pts_x[right_pts_cnt] = curr_x;
+ 291:         right_pts_y[right_pts_cnt] = curr_y;
+ 292:         right_pts_dir[right_pts_cnt] = curr_dir;
+ 293:         right_pts_cnt++;
+ 294: 
+ 295:         if (curr_y >= 0 && curr_y < MT9V03X_H) {
+ 296:             if (right_line_list[curr_y] == 255) {
+ 297:                 right_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+ 298:             }
+ 299:         }
+ 300: 
+ 301:         if (curr_y <= search_end_line) break;
+ 302: 
+ 303:         found = 0;
+ 304:         start_search = (curr_dir + 2) % 8; /* 向右转90度开始 */
+ 305:         
+ 306:         for (i = 0; i < 6; i++) {
+ 307:             search_dir = (start_search + 8 - i) % 8; /* 逆时针扫 */
+ 308:             nx = curr_x + dir_x[search_dir];
+ 309:             ny = curr_y + dir_y[search_dir];
+ 310: 
+ 311:             if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
+ 312:                 if (IS_WHITE(ny, nx)) {
+ 313:                     curr_x = nx;
+ 314:                     curr_y = ny;
+ 315:                     curr_dir = search_dir;
+ 316:                     found = 1;
+ 317:                     break;
+ 318:                 }
+ 319:             }
+ 320:         }
+ 321:         
+ 322:         if (!found) {
+ 323:             curr_y--;
+ 324:             curr_dir = 0;
+ 325:         }
+ 326:     }
+ 327: 
+ 328:     /* ---------------- 赛道空缺填补与中线计算 ---------------- */
+ 329:     for (i = search_start_line - 1; i > search_end_line; i--) {
+ 330:         if (left_line_list[i] == 255) {
+ 331:             left_line_list[i] = (i < search_start_line - 1) ? left_line_list[i + 1] : 1;
+ 332:         }
+ 333:         if (right_line_list[i] == 255) {
+ 334:             right_line_list[i] = (i < search_start_line - 1) ? right_line_list[i + 1] : MT9V03X_W - 2;
+ 335:         }
+ 336:         
+ 337:         left_line_raw[i] = left_line_list[i];
+ 338:         mid_line_list[i] = Limit_uint8(1, (left_line_list[i] + right_line_list[i]) / 2, MT9V03X_W - 2);
+ 339:     }
+ 340: }
+ 341: 
+ 342: // ==========================================
+ 343: // 环岛方向预判 (丢线统计 + 中线绝对领地防伪)
+ 344: // ==========================================
+ 345: void judge_roundabout_dir(void)
+ 346: {
+ 347:     int r;
+ 348:     uint16 left_lost_cnt = 0;
+ 349:     uint16 right_lost_cnt = 0;
+ 350:     
+ 351:     // 获取屏幕中线坐标 (假设宽度是188，中线就是94)
+ 352:     int half_w = MT9V03X_W / 2; 
+ 353: 
+ 354:     if (roundabout_state > 0) return;
+ 355: 
+ 356:     // 1. 扫描中上部区域，统计左右两侧的“丢线（贴边）”行数
+ 357:     for (r = 30; r < MT9V03X_H - 15; r++) {
+ 358:         if (left_line_list[r] <= 5) {
+ 359:             left_lost_cnt++;
+ 360:         }
+ 361:         if (right_line_list[r] >= MT9V03X_W - 6) { 
+ 362:             right_lost_cnt++;
+ 363:         }
+ 364:     }
+ 365: 
+ 366:     island_dir = 0; // 默认为无环岛
+ 367: 
+ 368:     /* ==========================================
+ 369:      * 【判断左环岛】
+ 370:      * 基础条件：左边大面积丢线，且比右边多。
+ 371:      * 防伪条件：取画面中上部(Y=50)作为参考。右边线必须坚守在右半区！
+ 372:      * ========================================== */
+ 373:     if (left_lost_cnt > 15 && left_lost_cnt > right_lost_cnt + 10) {
+ 374:         
+ 375:         // 【核心绝杀】：如果是在左急弯，右边线在 Y=50 处一定会越过中线跑到左边。
+ 376:         // 我们给一点容错 (+10)，只要它越过了屏幕中线附近，就识破它是弯道！
+ 377:         if (right_line_list[50] < half_w + 10) {
+ 378:             island_dir = 0; // 越界了，这是个左转弯！
+ 379:         } 
+ 380:         else {
+ 381:             island_dir = 1; // 右线坚守右半区，确认前方是左环岛！
+ 382:         }
+ 383:     }
+ 384:     
+ 385:     /* ==========================================
+ 386:      * 【判断右环岛】(同理，镜像处理)
+ 387:      * ========================================== */
+ 388:     else if (right_lost_cnt > 15 && right_lost_cnt > left_lost_cnt + 10) {
+ 389:         
+ 390:         // 如果是右急弯，左边线在 Y=50 处会越过中线跑到右边。
+ 391:         // 给一点容错 (-10)，只要左线跑到了右半区，识破为弯道。
+ 392:         if (left_line_list[50] > half_w - 10) {
+ 393:             island_dir = 0; // 越界了，这是个右转弯！
+ 394:         } 
+ 395:         else {
+ 396:             island_dir = 2; // 左线坚守左半区，确认前方是右环岛！
+ 397:         }
+ 398:     }
+ 399: }
+ 400: 
+ 401: 
+ 402: void zuohuan(void)
+ 403: {
+ 404:     /* --- 1. 變數聲明 --- */
+ 405:     int i, y, step, s, found;
+ 406:     int idx_A = -1, idx_B = -1;
+ 407:     int y_ref, x_ref, predict_x;
+ 408:     float k_slope;
+ 409:     int land_x = -1, land_y = -1;
+ 410:     int curr_x, curr_y, curr_dir;
+ 411:     int max_x = 0, max_y = 0;
+ 412:     int isl_x[200], isl_y[200]; 
+ 413:     int isl_cnt = 0;
+ 414: 
+ 415:     /* 【關鍵新增】：記憶上一幀 B 點的座標 */
+ 416:     static int last_B_x = 0;
+ 417:     static int last_B_y = 60; // 默認給個中景高度
+ 418: 
+ 419:     /* 清空特徵點座標 */
+ 420:     pt_down_x = 0; pt_down_y = 0;
+ 421:     pt_mid_x  = 0; pt_mid_y  = 0;
+ 422:     pt_up_x   = 0; pt_up_y   = 0;
+ 423: 
+ 424:     if (left_pts_cnt < 20) return;
+ 425: 		if (roundabout_state == R_NONE && island_dir != 1) {
+ 426: 			return;
+ 427: 		}
+ 428:     /* ==========================================            
+ 429:      * 步骤 1：寻找 A 点 (状态 2 时闭眼，不找了)
+ 430:      * ========================================== */
+ 431:     // 只有在 R_NONE (0) 和 R_IN_PATCH (1) 的状态下才允许找 A 点
+ 432:     if ((roundabout_state == R_NONE || roundabout_state == R_IN_PATCH) && island_dir== 1 ) {
+ 433:         for (i = 3; i < (int)left_pts_cnt - 5; i++) {
+ 434:             
+ 435:             /* 八邻域方向夹角特征判断 */
+ 436:             if ((left_pts_dir[i-1] == 0 || left_pts_dir[i-1] == 1 || left_pts_dir[i-1] == 7) && 
+ 437:                 (left_pts_dir[i+1] == 6 || left_pts_dir[i+1] == 7 || left_pts_dir[i+1] == 5)) {
+ 438:                 
+ 439:                 /* 【绝对下半场锁】：Y 坐标必须大于屏幕高度的 2/3
+ 440:                    这就把 A 点严格限制在了画面最下方的 1/3 区域！
+ 441:                    任凭远处赛道怎么反光、怎么扭曲，只要它没走到车头底下，统统无视！ */
+ 442:                 if (left_pts_y[i] > (MT9V03X_H /3 ) && left_pts_x[i] > 5) {
+ 443:                     
+ 444:                     pt_down_x = left_pts_x[i]; 
+ 445:                     pt_down_y = left_pts_y[i]; 
+ 446:                     idx_A = i; 
+ 447:                     break; 
+ 448:                 }
+ 449:             }
+ 450:         }
+ 451:     }
+ 452: 
+ 453:     /* ==========================================
+ 454:      * 步驟 2：登陸中心島 (宏定义滤波版，绝不降落在噪点上)
+ 455:      * ========================================== */
+ 456:     if (idx_A != -1 && roundabout_state == R_NONE) {
+ 457:         // 情況 A：A 點還在，靠 A 點射線登陸
+ 458:         y_ref = pt_down_y + 5; x_ref = left_line_list[y_ref];
+ 459:         k_slope = (float)(pt_down_x - x_ref) / ((float)(pt_down_y - y_ref) + 0.001f); 
+ 460:         for (y = pt_down_y - 2; y > 10; y--) {
+ 461:             predict_x = pt_down_x + (int)(k_slope * (float)(y - pt_down_y));
+ 462:             if (predict_x < 2) predict_x = 2;
+ 463:             
+ 464:             /* 【修改点 1】：使用 STABLE 宏，要求必须是一块实心的黑色区域才登陆 */
+ 465:             if (IS_BLACK_STABLE(y, predict_x) && IS_BLACK_STABLE(y, predict_x - 2)) {
+ 466:                 land_x = predict_x; land_y = y; break;
+ 467:             }
+ 468:         }
+ 469:     } 
+ 470:     else if (roundabout_state >= R_IN_PATCH) {
+ 471:         
+ 472:         int scan_up   = last_B_y - 15;
+ 473:         int scan_down = last_B_y + 15;
+ 474:         if (scan_up < 5) scan_up = 5;
+ 475:         if (scan_down > MT9V03X_H - 5) scan_down = MT9V03X_H - 5;
+ 476: 
+ 477:         for (y = scan_down; y >= scan_up; y--) {
+ 478:             int start_x = last_B_x + 30; 
+ 479:             if (start_x > MT9V03X_W - 5) start_x = MT9V03X_W - 5;
+ 480: 
+ 481:             for (predict_x = start_x; predict_x > 5; predict_x--) {
+ 482:                 
+ 483:                 /* 【修改点 2】：右边必须是坚实的白赛道，左边必须是坚实的黑岛屿。
+ 484:                    彻底免疫赛道里的一粒黑灰，或者岛屿边上的一粒白反光！ */
+ 485:                 if (IS_WHITE_STABLE(y, predict_x) && IS_BLACK_STABLE(y, predict_x - 1)) {
+ 486:                     land_x = predict_x - 1; 
+ 487:                     land_y = y;
+ 488:                     y = 0; break; 
+ 489:                 }
+ 490:             }
+ 491:         }
+ 492:     }
+ 493: 
+ 494:     /* ==========================================
+ 495:      * 【重要防护】：每次进入前，确保状态被清空，防止拿上一帧的旧数据算 C 点
+ 496:      * ========================================== */
+ 497:     idx_B = -1; 
+ 498:     // isl_cnt = 0; // 假设你的 isl_cnt 在更外层已经清零了，这里不用动
+ 499: 
+ 500:     /* ==========================================
+ 501:      * 步骤 3：爬虫寻找 B (逻辑不动)
+ 502:      * ========================================== */
+ 503:     if (land_x != -1  && roundabout_state<3) {
+ 504:         curr_x = land_x; curr_y = land_y; curr_dir = 0;
+ 505:         for (step = 0; step < 150; step++) {
+ 506:             if (curr_y <= 2 || isl_cnt >= 200) break; 
+ 507:             isl_x[isl_cnt] = curr_x; isl_y[isl_cnt] = curr_y; isl_cnt++;
+ 508: 
+ 509:             // 找到了 B 点，记录索引
+ 510:             if (curr_y >= 30 && curr_y <= 90 && curr_x >= max_x && curr_x <= (MT9V03X_W / 2)) {
+ 511:                 max_x = curr_x; max_y = curr_y; idx_B = isl_cnt - 1;
+ 512:             }
+ 513:             
+ 514:             found = 0;
+ 515:             for (s = 0; s < 8; s++) {
+ 516:                 int search_dir = (curr_dir + 6 + s) % 8;
+ 517:                 int nx = curr_x + dir_x[search_dir], ny = curr_y + dir_y[search_dir];
+ 518:                 if (nx >= 1 && nx < MT9V03X_W-1 && ny >= 2 && ny < MT9V03X_H) {
+ 519:                     if (IS_WHITE(ny, nx)) {
+ 520:                         curr_x = nx; curr_y = ny; curr_dir = search_dir; found = 1; break;
+ 521:                     }
+ 522:                 }
+ 523:             }
+ 524:             if (!found) curr_y--;
+ 525:         }
+ 526:         
+ 527:         /* ==========================================
+ 528:          * 【终极约束】：B 点 Y 轴单向阀保护
+ 529:          * ========================================== */
+ 530:         if (max_x > 10) { 
+ 531:             
+ 532:             /* 逻辑：如果已经确认进入环岛寻找阶段 (状态 1 或 2)，
+ 533:                且当前找到的 B 点高度 (max_y) 比上一帧 (last_B_y) 变小了超过 5 个像素
+ 534:                说明它诡异地往上跳了，违背了车向前开的物理规律！这是个假 B 点！*/
+ 535:             if (roundabout_state >= R_IN_PATCH && max_y < last_B_y - 5) {
+ 536:                 
+ 537:                 /* ? 发现假点：直接忽略它！
+ 538:                    并且强行继承上一帧正确的 B 点坐标，让状态机在这一帧安全度过 */
+ 539:                 pt_mid_x = last_B_x;
+ 540:                 pt_mid_y = last_B_y;
+ 541:             } 
+ 542:             else {
+ 543:                 /* ? 正常情况：Y 坐标是变大趋势，或者是第一次找 B 点，允许接纳 */
+ 544:                 pt_mid_x = max_x; 
+ 545:                 pt_mid_y = max_y; 
+ 546:                 
+ 547:                 /* 【合法更新記憶】 */
+ 548:                 last_B_x = pt_mid_x;
+ 549:                 last_B_y = pt_mid_y;
+ 550:             }
+ 551:         }
+ 552:     } // <--- 步骤 3 的大括号在这里结束！！！
+ 553: 
+ 554: 
+ 555: 				/* ==========================================
+ 556:              * 步骤 4：寻找 C 点 (垂直探测 + 动态记忆跟踪)
+ 557:              * ========================================== */
+ 558:             {
+ 559:                 /* 【新增】：记忆上一帧 C 点的坐标 */
+ 560:                 static int last_C_x = 0;
+ 561:                 static int last_C_y = 0;
+ 562:                 
+ 563:                 int y, x;
+ 564:                 int hit_y = -1;
+ 565:                 int hit_x = -1;
+ 566:                 int best_c_x = -1;
+ 567:                 int best_c_y = -1;
+ 568:                 int start_y;
+ 569:                 
+ 570:                 /* --------------------------------------------------
+ 571:                  * 模式 A：常规模式 (B 点存在，以 B 为锚点往上找)
+ 572:                  * -------------------------------------------------- */
+ 573:                 if (idx_B != -1 && isl_y[idx_B] > 20 && roundabout_state<4) {
+ 574:                     
+ 575:                     hit_x = isl_x[idx_B]; // 记录 B 点的横坐标作为垂直线
+ 576: 
+ 577:                     for (y = isl_y[idx_B] - 10; y > 10; y--) {
+ 578:                         if (IS_BLACK(y, hit_x)) {
+ 579:                             hit_y = y; 
+ 580:                             break;
+ 581:                         }
+ 582:                     }
+ 583:                 }
+ 584:                 /* --------------------------------------------------
+ 585:                  * 模式 B：盲区跟踪模式 (状态 3 不找 B 点了，以旧 C 点为锚点找新 C 点)
+ 586:                  * -------------------------------------------------- */
+ 587:                 else if (roundabout_state == 3 && last_C_x > 0) {
+ 588:                     
+ 589:                     /* 逻辑：车往前开，C 点在画面中会越来越往下(Y增大)。
+ 590:                        我们从旧 C 点往左平移 20 个像素，确保射线正对着黑岛底部。 */
+ 591:                     hit_x = last_C_x - 20;
+ 592:                     if (hit_x < 5) hit_x = 5;
+ 593: 
+ 594:                     /* 从旧 C 点稍微靠下的位置开始，垂直往上扫，寻找新的底边 */
+ 595:                     start_y = last_C_y + 20; 
+ 596:                     if (start_y >= MT9V03X_H) start_y = MT9V03X_H - 1;
+ 597: 
+ 598:                     for (y = start_y; y > 5; y--) {
+ 599:                         if (IS_BLACK(y, hit_x)) {
+ 600:                             hit_y = y;
+ 601:                             break;
+ 602:                         }
+ 603:                     }
+ 604:                 }
+ 605: 
+ 606:                 /* --------------------------------------------------
+ 607:                  * 共有特征提取：找到了黑边 hit_y，开始横向找角点
+ 608:                  * -------------------------------------------------- */
+ 609:                 if (hit_y != -1) {
+ 610:                     /* 在撞墙这一行(hit_y)，从 hit_x 开始向右扫描找尖角 */
+ 611:                     for (x = hit_x; x < MT9V03X_W - 5; x++) {
+ 612:                         if (IS_BLACK(hit_y, x) && IS_WHITE(hit_y, x + 1)) {
+ 613:                             /* ?? 【核心空间锁】：限制 C 点横坐标必须小于 90 */
+ 614:                             if (x < 90) {
+ 615:                                 best_c_x = x;
+ 616:                                 best_c_y = hit_y;
+ 617:                                 break;
+ 618:                             }
+ 619:                         }
+ 620:                     }
+ 621: 
+ 622:                     /* 容错：尝试在稍高一点的一行找 */
+ 623:                     if (best_c_x == -1 && hit_y > 5) {
+ 624:                         for (x = hit_x; x < MT9V03X_W - 5; x++) {
+ 625:                             if (IS_BLACK(hit_y - 2, x) && IS_WHITE(hit_y - 2, x + 1)) {
+ 626:                                 /* ?? 【核心空间锁】：限制 C 点横坐标必须小于 90 */
+ 627:                                 if (x < 90) {
+ 628:                                     best_c_x = x;
+ 629:                                     best_c_y = hit_y - 2;
+ 630:                                     break;
+ 631:                                 }
+ 632:                             }
+ 633:                         }
+ 634:                     }
+ 635:                 }
+ 636: 
+ 637:                 /* --------------------------------------------------
+ 638:                  * 最终输出与记忆更新
+ 639:                  * -------------------------------------------------- */
+ 640:                 if (best_c_x != -1) {
+ 641:                     pt_up_x = best_c_x;
+ 642:                     pt_up_y = best_c_y;
+ 643:                     
+ 644:                     /* 安全校验：向下移动 1 像素落入白区 */
+ 645:                     if (IS_WHITE(pt_up_y + 1, pt_up_x)) {
+ 646:                         pt_up_y += 1;
+ 647:                     }
+ 648: 
+ 649:                     /* 【关键更新】：把成功找到的新 C 点存入记忆，供下一帧使用 */
+ 650:                     last_C_x = pt_up_x;
+ 651:                     last_C_y = pt_up_y;
+ 652:                 } else {
+ 653:                     /* ==========================================
+ 654:                      * ??? 【核心护甲】：C点惯性下沉防闪穿
+ 655:                      * ========================================== */
+ 656:                     if (roundabout_state == 3) {
+ 657:                         // 如果之前看到过C点，现在丢了，给它加上惯性车速往下掉！
+ 658:                         if (last_C_y > 0) {
+ 659:                             pt_up_x = last_C_x;
+ 660:                             pt_up_y = last_C_y + 10; // 每帧强行下坠 10 像素
+ 661:                             if (pt_up_y > 110) pt_up_y = 110; // 防溢出
+ 662:                         } 
+ 663:                         else {
+ 664:                             // 强行在屏幕左上方伪造一个基准点，逼迫 60 度斜线画出来
+ 665:                             pt_up_x = 20; 
+ 666:                             pt_up_y = 10; 
+ 667:                         }
+ 668:                         
+ 669:                         // 更新记忆，让它下一帧继续往下掉
+ 670:                         last_C_x = pt_up_x;
+ 671:                         last_C_y = pt_up_y;
+ 672:                     } 
+ 673:                     else {
+ 674:                         /* 如果不是状态 3 彻底找不到了，就清零 */
+ 675:                         last_C_x = 0;
+ 676:                         last_C_y = 0;
+ 677:                     }
+ 678:                 }
+ 679:             }/* ==========================================
+ 680:              * 步骤 4：寻找 C 点 (垂直探测 + 动态记忆跟踪)
+ 681:              * ========================================== */
+ 682:             {
+ 683:                 /* 【新增】：记忆上一帧 C 点的坐标 */
+ 684:                 static int last_C_x = 0;
+ 685:                 static int last_C_y = 0;
+ 686:                 
+ 687:                 int y, x;
+ 688:                 int hit_y = -1;
+ 689:                 int hit_x = -1;
+ 690:                 int best_c_x = -1;
+ 691:                 int best_c_y = -1;
+ 692:                 int start_y;
+ 693:                 
+ 694:                 /* --------------------------------------------------
+ 695:                  * 模式 A：常规模式 (B 点存在，以 B 为锚点往上找)
+ 696:                  * -------------------------------------------------- */
+ 697:                 if (idx_B != -1 && isl_y[idx_B] > 20 && roundabout_state<4) {
+ 698:                     
+ 699:                     hit_x = isl_x[idx_B]; // 记录 B 点的横坐标作为垂直线
+ 700: 
+ 701:                     for (y = isl_y[idx_B] - 10; y > 10; y--) {
+ 702:                         if (IS_BLACK(y, hit_x)) {
+ 703:                             hit_y = y; 
+ 704:                             break;
+ 705:                         }
+ 706:                     }
+ 707:                 }
+ 708:                 /* --------------------------------------------------
+ 709:                  * 模式 B：盲区跟踪模式 (状态 3 不找 B 点了，以旧 C 点为锚点找新 C 点)
+ 710:                  * -------------------------------------------------- */
+ 711:                 else if (roundabout_state == 3 && last_C_x > 0) {
+ 712:                     
+ 713:                     /* 逻辑：车往前开，C 点在画面中会越来越往下(Y增大)。
+ 714:                        我们从旧 C 点往左平移 20 个像素，确保射线正对着黑岛底部。 */
+ 715:                     hit_x = last_C_x - 20;
+ 716:                     if (hit_x < 5) hit_x = 5;
+ 717: 
+ 718:                     /* 从旧 C 点稍微靠下的位置开始，垂直往上扫，寻找新的底边 */
+ 719:                     start_y = last_C_y + 20; 
+ 720:                     if (start_y >= MT9V03X_H) start_y = MT9V03X_H - 1;
+ 721: 
+ 722:                     for (y = start_y; y > 5; y--) {
+ 723:                         if (IS_BLACK(y, hit_x)) {
+ 724:                             hit_y = y;
+ 725:                             break;
+ 726:                         }
+ 727:                     }
+ 728:                 }
+ 729: 
+ 730:                 /* --------------------------------------------------
+ 731:                  * 共有特征提取：找到了黑边 hit_y，开始横向找角点
+ 732:                  * -------------------------------------------------- */
+ 733:                 if (hit_y != -1) {
+ 734:                     
+ 735:                     /* ?? 【核心高度锁】：限制 C 点高度 (Y) 必须小于 90
+ 736:                        如果撞墙的这一行已经处于画面最下方 (>= 90)，说明车头已经贴近了，
+ 737:                        这个角点极有可能是 A 点或车头噪点，直接放弃提取！ */
+ 738:                     if (hit_y < 90) {
+ 739:                         
+ 740:                         /* 在撞墙这一行(hit_y)，从 hit_x 开始向右扫描找尖角 */
+ 741:                         for (x = hit_x; x < MT9V03X_W - 5; x++) {
+ 742:                             if (IS_BLACK(hit_y, x) && IS_WHITE(hit_y, x + 1)) {
+ 743:                                 best_c_x = x;
+ 744:                                 best_c_y = hit_y;
+ 745:                                 break;
+ 746:                             }
+ 747:                         }
+ 748:                     }
+ 749: 
+ 750:                     /* 容错：尝试在稍高一点的一行找 */
+ 751:                     if (best_c_x == -1 && hit_y > 5) {
+ 752:                         
+ 753:                         /* 同样加上高度锁 */
+ 754:                         if ((hit_y - 2) < 90) {
+ 755:                             for (x = hit_x; x < MT9V03X_W - 5; x++) {
+ 756:                                 if (IS_BLACK(hit_y - 2, x) && IS_WHITE(hit_y - 2, x + 1)) {
+ 757:                                     best_c_x = x;
+ 758:                                     best_c_y = hit_y - 2;
+ 759:                                     break;
+ 760:                                 }
+ 761:                             }
+ 762:                         }
+ 763:                     }
+ 764:                 }
+ 765: 
+ 766:                 /* --------------------------------------------------
+ 767:                  * 最终输出与记忆更新
+ 768:                  * -------------------------------------------------- */
+ 769:                 if (best_c_x != -1) {
+ 770:                     pt_up_x = best_c_x;
+ 771:                     pt_up_y = best_c_y;
+ 772:                     
+ 773:                     /* 安全校验：向下移动 1 像素落入白区 */
+ 774:                     if (IS_WHITE(pt_up_y + 1, pt_up_x)) {
+ 775:                         pt_up_y += 1;
+ 776:                     }
+ 777: 
+ 778:                     /* 【关键更新】：把成功找到的新 C 点存入记忆，供下一帧使用 */
+ 779:                     last_C_x = pt_up_x;
+ 780:                     last_C_y = pt_up_y;
+ 781:                 } else {
+ 782:                     /* ==========================================
+ 783:                      * ??? 【核心护甲】：C点惯性下沉防闪穿
+ 784:                      * ========================================== */
+ 785:                     if (roundabout_state == 3) {
+ 786:                         // 如果之前看到过C点，现在丢了，给它加上惯性车速往下掉！
+ 787:                         if (last_C_y > 0) {
+ 788:                             pt_up_x = last_C_x;
+ 789:                             pt_up_y = last_C_y + 10; // 每帧强行下坠 10 像素
+ 790:                             if (pt_up_y > 110) pt_up_y = 110; // 防溢出
+ 791:                         } 
+ 792:                         else {
+ 793:                             // 强行在屏幕左上方伪造一个基准点，逼迫 60 度斜线画出来
+ 794:                             pt_up_x = 20; 
+ 795:                             pt_up_y = 10; 
+ 796:                         }
+ 797:                         
+ 798:                         // 更新记忆，让它下一帧继续往下掉
+ 799:                         last_C_x = pt_up_x;
+ 800:                         last_C_y = pt_up_y;
+ 801:                     } 
+ 802:                     else {
+ 803:                         /* 如果不是状态 3 彻底找不到了，就清零 */
+ 804:                         last_C_x = 0;
+ 805:                         last_C_y = 0;
+ 806:                     }
+ 807:                 }
+ 808:             }
+ 809: 
+ 810: 						
+ 811: 						/* ==========================================
+ 812:      * 步骤 5：状态 4 & 5 专属 - 绿线曲率寻拐法 (出岛点)
+ 813:      * 目标：动态阈值 + 边缘防伪 + 暴力突变特权
+ 814:      * ========================================== */
+ 815:     exit_pt_x = 0;
+ 816:     exit_pt_y = 0;
+ 817: 
+ 818:     if (roundabout_state == 4 || roundabout_state == 5) {
+ 819:         int y;
+ 820:         int step = 4;           /* 【敏感升级】：步长改为 4，让远处的突变更明显 */
+ 821:         int min_x = MT9V03X_W;  
+ 822:         int max_dx = 0;         
+ 823:         int best_y = -1;
+ 824:         int dx;
+ 825:         int dynamic_threshold;
+ 826: 
+ 827:         /* 【范围扩大】：从屏幕最底下 H-5 开始，一路往上搜到距离顶部 15 行 */
+ 828:         for (y = MT9V03X_H - 5; y >= 15 + step; y--) {
+ 829:             int curr_x = right_line_list[y];
+ 830:             int up_x   = right_line_list[y - step]; 
+ 831:             
+ 832:             /* 【准确升级：边缘防伪】：
+ 833:                如果当前点或上方的点贴在了屏幕最右侧(无效默认值)，
+ 834:                说明绿线在这里断了或出界了，直接跳过，绝不能当拐点！ */
+ 835:             if (curr_x >= MT9V03X_W - 5 || up_x >= MT9V03X_W - 5) {
+ 836:                 continue; 
+ 837:             }
+ 838: 
+ 839:             if (curr_x < min_x) {
+ 840:                 min_x = curr_x;
+ 841:             }
+ 842: 
+ 843:             dx = up_x - curr_x;
+ 844: 
+ 845:             /* 【敏感升级：三段式动态阈值】
+ 846:                Y < 40 (远处) ：只需要 4 个像素突变就认！
+ 847:                Y < 75 (中景) ：需要 6 个像素。
+ 848:                其余 (近处)  ：需要 8 个像素。 */
+ 849:             if (y < 40) {
+ 850:                 dynamic_threshold = 4;
+ 851:             } else if (y < 75) {
+ 852:                 dynamic_threshold = 6;
+ 853:             } else {
+ 854:                 dynamic_threshold = 8;
+ 855:             }
+ 856: 
+ 857:             /* 如果超过了动态阈值，并且比之前记录的都大，则开始竞争 best_y */
+ 858:             if (dx > dynamic_threshold && dx > max_dx) {
+ 859:                 
+ 860:                 /* 【敏感升级：放宽突出度束缚 + 暴力特权】
+ 861:                    条件A：位于突出点附近 (容错拉宽到 min_x + 12)
+ 862:                    条件B：如果 dx 突然大于 15 (极其暴力的撕裂)，无视突出条件直接认！ */
+ 863:                 if (curr_x <= min_x + 12 || dx > 15) {
+ 864:                     max_dx = dx;
+ 865:                     best_y = y;
+ 866:                 }
+ 867:             }
+ 868:         }
+ 869: 
+ 870:         /* 【核心 Bug 修复】：去掉了 max_dx > 8 的死板校验！
+ 871:            只要 best_y 被赋值了，说明它一定通过了上面的动态阈值筛选！ */
+ 872:         if (best_y != -1) {
+ 873:             exit_pt_x = right_line_list[best_y];
+ 874:             exit_pt_y = best_y;
+ 875:         }
+ 876: 
+ 877:         /* --------------------------------------------------
+ 878:          * 出岛切线预判
+ 879:          * -------------------------------------------------- */
+ 880:         if (exit_pt_x != 0) {
+ 881:             /* 在状态 4 下看见点，立刻切入状态 5 准备拉线！ */
+ 882:             if (roundabout_state == 4) {
+ 883:                 roundabout_state = 5; 
+ 884:             }
+ 885:         }
+ 886:     }
+ 887: 		
+ 888: 		
+ 889: 		
+ 890: 		
+ 891:     /* ==========================================
+ 892:      * 状态切换逻辑
+ 893:      * ========================================== */
+ 894:     if (roundabout_state == R_NONE) {
+ 895:         if (pt_down_x > 0 && pt_mid_x > 0) roundabout_state = R_IN_PATCH; 
+ 896:     } 
+ 897:     else if (roundabout_state == R_IN_PATCH) {
+ 898:         if (pt_down_x == 0 && pt_mid_x > 0) roundabout_state = R_A_LOST;  
+ 899:         if (pt_mid_x == 0) roundabout_state = R_NONE; 
+ 900:     }
+ 901:     else if (roundabout_state == R_A_LOST) {
+ 902:         
+ 903:         /* 【核心修正】：用 B 点的 Y 坐标 (pt_mid_y) 判断距离！
+ 904:            当 B 点下沉到画面中下方(>50)时，说明车已经贴近环岛入口，立刻切入！ */
+ 905:         if (pt_mid_y > 50 && pt_up_y > 0) {
+ 906:             roundabout_state = 3; // 进入状态 3 (强制拉角入环)
+ 907:         }
+ 908:         /* 如果 B 点彻底丢了 (坐标为 0) */
+ 909:         else if (pt_mid_y == 0) {
+ 910:             roundabout_state = R_NONE;
+ 911:             last_B_y = 60; // 彻底丢失后重置预测高度
+ 912:         }
+ 913:     }
+ 914:     /* 状态 3 的退出逻辑 */
+ 915:     else if (roundabout_state == 3) {
+ 916:         // 进环后，C 点(上拐点)也会逐渐掉出屏幕下方而丢失
+ 917:         if (pt_up_y == 0) {
+ 918:             roundabout_state = 4; // 切入状态 4：环内巡航
+ 919:         }
+ 920:     }
+ 921: 		/* ==========================================
+ 922:      * 狀態 5 退出邏輯：出島點丟失 -> 進入狀態 6
+ 923:      * ========================================== */
+ 924:     else if (roundabout_state == 5) {
+ 925:         /* * 當 exit_pt_x 歸 0，說明車頭已經完全甩出環島，
+ 926:          * 那個右側的角點已經掉出了屏幕下方或被車身遮擋。
+ 927:          */
+ 928:         if (exit_pt_x == 0) {
+ 929:             roundabout_state = 6; 
+ 930:             
+ 931:         }
+ 932:     }
+ 933:     
+ 934: //    /* ==========================================
+ 935: //     * 状态机跳转：状态 6 (出岛恢复) -> 状态 0 (重生)
+ 936: //     * ========================================== */
+ 937: //    else if (roundabout_state == 6) {
+ 938: //        
+ 939: //        /* --- A. 特征扫描 (用于判断是否退出) --- */
+ 940: //        int y;
+ 941: //        int trough_x = 255, trough_y = -1; 
+ 942: //        int pt_up_x = 0, pt_up_y = -1;     
+ 943: //        int draw_flag = 0; 
+ 944: 
+ 945: //        // 1. 寻找左边线波谷 (最靠左的点)
+ 946: //        for (y = MT9V03X_H - 15; y >= 20; y--) {
+ 947: //            int curr_x = left_line_list[y];
+ 948: //            if (curr_x > 1 && curr_x < MT9V03X_W - 5) {
+ 949: //                if (curr_x < trough_x) {
+ 950: //                    trough_x = curr_x;
+ 951: //                    trough_y = y;
+ 952: //                }
+ 953: //            }
+ 954: //        }
+ 955: 
+ 956: //        // 2. 如果有波谷，向上寻找上波峰 (岛尖 C 点)
+ 957: //        if (trough_y != -1) {
+ 958: //            for (y = trough_y; y >= 15; y--) {
+ 959: //                if (left_line_list[y] > pt_up_x && left_line_list[y] < MT9V03X_W - 5) {
+ 960: //                    pt_up_x = left_line_list[y];
+ 961: //                    pt_up_y = y;
+ 962: //                }
+ 963: //            }
+ 964: 
+ 965: //            /* --- B. 退出条件判定 --- */
+ 966: //            // 判定 A：双山丘判断 (这里只需判断上峰和波谷的落差是否还在)
+ 967: //            // 判定 B：单山丘判断 (只要上波峰比波谷向右凸出 4 像素以上，就认为特征还在)
+ 968: //            if (pt_up_y != -1 && (pt_up_x - trough_x >= 4)) {
+ 969: //                draw_flag = 1; // 特征依然存在，继续维持状态 6
+ 970: //            }
+ 971: //        }
+ 972: 
+ 973: //        /* --- C. 执行归零 (重生) --- */
+ 974: //        // 如果连波谷都没了 (trough_y == -1)
+ 975: //        // 或者虽然有波谷，但已经没有明显的凸起山峰了 (draw_flag == 0)
+ 976: //        if (trough_y == -1 || draw_flag == 0) {
+ 977: //            
+ 978: //            roundabout_state = R_NONE; // 【核心】：回到状态 0
+ 979: //            
+ 980: //            /* --- D. 变量大扫除：防止旧数据干扰下一轮环岛判断 --- */
+ 981: //            pt_down_x = 0; pt_down_y = 0; 
+ 982: //            pt_mid_x  = 0; pt_mid_y  = 0; 
+ 983: //            pt_up_x   = 0; pt_up_y   = 0; 
+ 984: //            exit_pt_x = 0; exit_pt_y = 0; 
+ 985: //            
+ 986: //            last_B_y = 60; // 恢复初始预测高度
+ 987: //            
+ 988: //            // 如果你在状态 6 用了计时器，记得也清零
+ 989: //            // state6_timer = 0; 
+ 990: //        }
+ 991: //    } 
+ 992: }
+ 993: 
+ 994: void patch_roundabout(void)
+ 995: {
+ 996:     int r, new_x;
+ 997:     float slope;
+ 998: 	
+ 999:     // --- 状态 1：正常的 A-B 补线 ---
+1000:     if (roundabout_state == R_IN_PATCH) {
+1001:         if (pt_down_x > 0 && pt_mid_x > 0 && pt_down_y != pt_mid_y) {
+1002:             slope = (float)((int)pt_down_x - (int)pt_mid_x) / (float)((int)pt_down_y - (int)pt_mid_y);
+1003:             for (r = pt_down_y; r >= (int)pt_mid_y; r--) {
+1004:                 new_x = (int)pt_down_x - (int)(slope * (float)((int)pt_down_y - r));
+1005:                 left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+1006:                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
+1007:             }
+1008:         }
+1009:     }
+1010: 
+1011:     // --- 状态 2：A 消失，从 B 点直接连到屏幕左下角 ---
+1012:     else if (roundabout_state == R_A_LOST) {
+1013:         if (pt_mid_x > 0 && pt_mid_y < MT9V03X_H - 1) { 
+1014:             slope = (float)(1 - (int)pt_mid_x) / (float)((MT9V03X_H - 1) - (int)pt_mid_y);
+1015:             for (r = pt_mid_y; r < MT9V03X_H; r++) {
+1016:                 new_x = (int)pt_mid_x + (int)(slope * (float)(r - (int)pt_mid_y));
+1017:                 left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+1018:                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
+1019:             }
+1020:         }
+1021:     }
+1022:     
+1023:     // --- 【修正】状态 3：快进环岛，从 C 点向右下角呈 60 度猛烈拉线 ---
+1024:     else if (roundabout_state == 3 || roundabout_state == 2) {
+1025:         /* 确保 C 点有效 */
+1026:         if (pt_up_x > 0 && pt_up_y < MT9V03X_H - 1) { 
+1027:             
+1028:             /* 从 C 点位置向下，一路强行画到屏幕底部 */
+1029:             for (r = pt_up_y; r < MT9V03X_H; r++) {
+1030:                 
+1031:                 /* 计算 60 度角拉线的理论 X 坐标 */
+1032:                 new_x = (int)pt_up_x + ((r - (int)pt_up_y) * 7) / 4;
+1033:                 
+1034:                 /* ==========================================
+1035:                  * 【核心新增】：相交截断保护 (防底层干扰)
+1036:                  * ========================================== */
+1037:                 /* 如果我们算出来的拉线 X 坐标，已经撞上（大于等于）了原本存在的真实右边线，
+1038:                    说明引导线已经完美切入了真实赛道边界！
+1039:                    立刻 break 打断循环，保留下方所有真实有效的边线和中线数据！*/
+1040:                 if (new_x >= right_line_list[r]) {
+1041:                     break; 
+1042:                 }
+1043:                 
+1044:                 /* Limit_uint8 保护，防止越界 */
+1045:                 right_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+1046:                 
+1047:                 /* 重新计算这一行的中线，引导舵机暴躁入环 */
+1048:                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
+1049:             }
+1050:         }
+1051:     }
+1052: 		
+1053: 		// --- 【极简暴力版】状态 5：强行出岛，右线左上60度拉线，蓝线死锁屏幕左边缘 ---
+1054:     else if (roundabout_state == 5) {
+1055:         /* 确保出岛点有效 */
+1056:         if (exit_pt_x > 0 && exit_pt_y > 0) { 
+1057:             
+1058:             for (r = exit_pt_y; r >= 0; r--) {
+1059:                 
+1060:                 /* ==========================================
+1061:                  * 1. 绿线：60度角左上强拉 
+1062:                  * ========================================== */
+1063:                 new_x = (int)exit_pt_x - (((int)exit_pt_y - r) * 7) / 4;
+1064:                 right_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+1065:                 
+1066:                 /* ==========================================
+1067:                  * 2. 蓝线：放弃寻线，直接锁死在屏幕最左侧！
+1068:                  * (假设 1 是你屏幕最左边的有效坐标)
+1069:                  * ========================================== */
+1070:                 left_line_list[r] = 1; 
+1071:                 
+1072:                 /* ==========================================
+1073:                  * 3. 极简截断保护
+1074:                  * ========================================== */
+1075:                 /* 如果右边切进来的绿线，已经撞到了屏幕最左侧(和蓝线重合了)，
+1076:                    说明这个出岛的“漏斗”已经闭合了，上面的部分没必要再算了！ */
+1077:                 if (right_line_list[r] <= 2) {
+1078:                     break; 
+1079:                 }
+1080: 
+1081:                 /* ==========================================
+1082:                  * 4. 融合中线
+1083:                  * ========================================== */
+1084:                 /* 此时中线完全是由右侧 60 度的斜率主导的，
+1085:                    没有任何外界图像噪点能干扰舵机的动作，平滑到极致！ */
+1086:                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
+1087:             }
+1088:         }
+1089:     }
+1090: 		
+1091: 		// --- 状态 6：出岛恢复期 (双峰波谷搭桥 + 单峰左下兜底) ---
+1092:     else if (roundabout_state == 6) {
+1093:         int y;
+1094:         int pt_down_x = 0, pt_down_y = -1; // 下方波峰
+1095:         int trough_x = 255, trough_y = -1; // 波谷最深处
+1096:         int pt_up_x = 0, pt_up_y = -1;     // 上方波峰 (出岛 C 点)
+1097: 				int draw_flag;
+1098:         /* ==========================================
+1099:          * 步骤 1 & 2：扫描最深波谷，并向上下寻找波峰 (逻辑不变)
+1100:          * ========================================== */
+1101:         for (y = MT9V03X_H - 15; y >= 20; y--) {
+1102:             int curr_x = left_line_list[y];
+1103:             if (curr_x > 1 && curr_x < MT9V03X_W - 5) {
+1104:                 if (curr_x < trough_x) {
+1105:                     trough_x = curr_x;
+1106:                     trough_y = y;
+1107:                 }
+1108:             }
+1109:         }
+1110: 
+1111:         if (trough_y != -1) {
+1112:             // 往下找下波峰
+1113:             for (y = trough_y; y <= MT9V03X_H - 5; y++) {
+1114:                 int curr_x = left_line_list[y];
+1115:                 if (curr_x > pt_down_x && curr_x < MT9V03X_W - 5) {
+1116:                     pt_down_x = curr_x;
+1117:                     pt_down_y = y;
+1118:                 }
+1119:             }
+1120: 
+1121:             // 往上找上波峰
+1122:             for (y = trough_y; y >= 15; y--) {
+1123:                 int curr_x = left_line_list[y];
+1124:                 if (curr_x > pt_up_x && curr_x < MT9V03X_W - 5) {
+1125:                     pt_up_x = curr_x;
+1126:                     pt_up_y = y;
+1127:                 }
+1128:             }
+1129: 
+1130:             /* ==========================================
+1131:              * 步骤 3：多级验证与搭桥连线 (增加左下兜底逻辑)
+1132:              * ========================================== */
+1133:             draw_flag = 0; // 是否执行连线的标志：0=不画，1=画
+1134: 
+1135:             // 【情况 A：完美的双山丘波谷】
+1136:             // 上下波峰都存在，且都比波谷向右凸出至少 4 个像素
+1137:             if (pt_down_y != -1 && pt_up_y != -1 && pt_down_y > pt_up_y) {
+1138:                 if ((pt_down_x - trough_x >= 4) && (pt_up_x - trough_x >= 4)) {
+1139:                     draw_flag = 1; // 满足双峰条件
+1140:                 }
+1141:             }
+1142: 
+1143:             // 【情况 B：单山丘兜底 (用户新增逻辑)】
+1144:             // 如果情况 A 没触发 (下山丘不存在或不明显)，但上山丘(C点)依然坚挺地存在着！
+1145:             if (draw_flag == 0 && pt_up_y != -1 && (pt_up_x - trough_x >= 4)) {
+1146:                 
+1147:                 // 【核心兜底】：强行把下方波峰的锚点，拉到屏幕的最左下角！
+1148:                 pt_down_x = 1;                  // 屏幕最左边缘 (防止越界用 1)
+1149:                 pt_down_y = MT9V03X_H - 1;      // 屏幕最底端
+1150:                 
+1151:                 draw_flag = 1; // 满足单峰兜底条件，准备强行画线
+1152:             }
+1153: 
+1154:             /* ==========================================
+1155:              * 步骤 4：统一执行插值连线
+1156:              * ========================================== */
+1157:             if (draw_flag == 1) {
+1158:                 // 计算两点之间的差值
+1159:                 int dx = pt_down_x - pt_up_x;
+1160:                 int dy = pt_down_y - pt_up_y;
+1161: 
+1162:                 // 从上波峰一路画到下方的目标点 (下波峰 或 左下角)
+1163:                 for (y = pt_up_y; y <= pt_down_y; y++) {
+1164:                     
+1165:                     // 极速整数插值算法
+1166:                     int new_x = pt_up_x + (dx * (y - pt_up_y)) / dy;
+1167:                     
+1168:                     // 刷新蓝线，并做好安全限制
+1169:                     left_line_list[y] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+1170:                     
+1171:                     // 重新计算被刷新这一段的中线 (红线)
+1172:                     mid_line_list[y] = (left_line_list[y] + right_line_list[y]) / 2;
+1173:                 }
+1174:             }
+1175:         }
+1176:     }
+1177: }
+1178: 
+1179: /* ===================== 中线加权 ===================== */
+1180: uint8 mid_weight_list[120]=
+1181: {
+1182:     1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,
+1183:     1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,
+1184:     1,1,1,1,1,1,1,1,1,1, 6,6,6,6,6,6,6,6,6,6,
+1185:     7,8,9,10,11,12,13,14,15,16,17,18,19,20,20,20,20,19,18,17,
+1186:     16,15,14,13,12,11,10,9,8,7,6,6,6,6,6,6,6,6,6,6,
+1187:     1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1
+1188: };
+1189: 
+1190:  uint8 final_mid_line = MID_W;
+1191: uint8 last_mid_line = MID_W;
+1192: 
+1193: uint8 find_mid_line_weight(void)
+1194: {
+1195:     uint8 mid_line_value = MID_W;
+1196:     uint8 mid_line = MID_W;
+1197:     uint32 weight_midline_sum = 0;
+1198:     uint32 weight_sum = 0;
+1199:     uint8 i;
+1200: 
+1201:     for(i=MT9V03X_H-1; i>search_end_line; i--) {
+1202:         weight_midline_sum += mid_line_list[i] * mid_weight_list[i];
+1203:         weight_sum += mid_weight_list[i];
+1204:     }
+1205:     mid_line=(uint8)(weight_midline_sum/weight_sum);
+1206:     mid_line_value=last_mid_line*0.05+mid_line*0.95;
+1207:     last_mid_line=mid_line_value;
+1208:     return mid_line_value;
+1209: }
+1210: 
+1211: /* ===================== 画线 ===================== */
+1212: void draw_line(void)
+1213: {
+1214:     uint8 i;
+1215:     int px, py,ax,ay;
+1216: 		int d;
+1217: 
+1218:     for(i = MT9V03X_H - 1; i>search_end_line; i--) {
+1219:         px = (Limit_uint8(1,left_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
+1220:         ips200_draw_point(px, py, RGB565_BLUE);
+1221:         ips200_draw_point(px, py+1, RGB565_BLUE);
+1222: 
+1223:         px = (Limit_uint8(1,right_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
+1224:         ips200_draw_point(px, py, RGB565_GREEN);
+1225:         ips200_draw_point(px, py+1, RGB565_GREEN);
+1226: 
+1227:         px = (Limit_uint8(1,mid_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
+1228:         ips200_draw_point(px, py, RGB565_RED);
+1229:         ips200_draw_point(px, py+1, RGB565_RED);
+1230:     }
+1231: 		
+1232: 		// 新增：画出 A 点红色大十字 (上下左右各 3 像素)
+1233:     // ==========================================
+1234:     if (pt_down_y > 0 && pt_down_y < MT9V03X_H) {
+1235:         // 1. 把相机坐标映射到 IPS 屏幕坐标
+1236:         ax = ((int)pt_down_x * 9) >> 3;
+1237:         ay = ((int)pt_down_y * 9) >> 3;
+1238:         
+1239:         
+1240:         // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
+1241:         for (d = -3; d <= 3; d++) {
+1242:             // 安全限制，防止画到屏幕外导致死机
+1243:             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
+1244:                 ips200_draw_point(ax + d, ay, RGB565_RED); // 横线
+1245:             }
+1246:             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
+1247:                 ips200_draw_point(ax, ay + d, RGB565_RED); // 竖线
+1248:             }
+1249:         }
+1250:     }
+1251: 		// 新增：画出 B 点红色大十字 (上下左右各 3 像素)
+1252:     // ==========================================
+1253:     if (pt_mid_y > 0 && pt_mid_y < MT9V03X_H) {
+1254:         // 1. 把相机坐标映射到 IPS 屏幕坐标
+1255:         ax = ((int)pt_mid_x * 9) >> 3;
+1256:         ay = ((int)pt_mid_y * 9) >> 3;
+1257:         
+1258:         
+1259:         // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
+1260:         for (d = -3; d <= 3; d++) {
+1261:             // 安全限制，防止画到屏幕外导致死机
+1262:             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
+1263:                 ips200_draw_point(ax + d, ay, RGB565_RED); // 横线
+1264:             }
+1265:             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
+1266:                 ips200_draw_point(ax, ay + d, RGB565_RED); // 竖线
+1267:             }
+1268:         }
+1269:     }
+1270: 		// 新增：画出 C 点红色大十字 (上下左右各 3 像素)
+1271:     // ==========================================
+1272:     if (pt_up_y > 0 && pt_up_y < MT9V03X_H) {
+1273:         // 1. 把相机坐标映射到 IPS 屏幕坐标
+1274:         ax = ((int)pt_up_x * 9) >> 3;
+1275:         ay = ((int)pt_up_y * 9) >> 3;
+1276:         
+1277:         
+1278:         // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
+1279:         for (d = -3; d <= 3; d++) {
+1280:             // 安全限制，防止画到屏幕外导致死机
+1281:             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
+1282:                 ips200_draw_point(ax + d, ay, RGB565_PURPLE); // 横线
+1283:             }
+1284:             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
+1285:                 ips200_draw_point(ax, ay + d, RGB565_PURPLE); // 竖线
+1286:             }
+1287:         }
+1288:     }
+1289: 		// ==========================================
+1290:     if (exit_pt_x > 0 && exit_pt_y < MT9V03X_H) {
+1291:         // 1. 把相机坐标映射到 IPS 屏幕坐标
+1292:         ax = ((int)exit_pt_x * 9) >> 3;
+1293:         ay = ((int)exit_pt_y * 9) >> 3;
+1294:         
+1295:         
+1296:         // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
+1297:         for (d = -3; d <= 3; d++) {
+1298:             // 安全限制，防止画到屏幕外导致死机
+1299:             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
+1300:                 ips200_draw_point(ax + d, ay, RGB565_BROWN); // 横线
+1301:             }
+1302:             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
+1303:                 ips200_draw_point(ax, ay + d, RGB565_BROWN); // 竖线
+1304:             }
+1305:         }
+1306:     }
+1307: }
+1308: 
+1309: #if (IPS200_OR_WIFI == 0)
+1310: void camara_init(void)
+1311: {
+1312:     ips200_init();
+1313:     ips200_show_string(0, 0, "mt9v03x init.");
+1314:     while(1) {
+1315:         system_delay_ms(100);
+1316:         if(mt9v03x_init()) ips200_show_string(0, 16, "mt9v03x reinit.");
+1317:         else break;
+1318:     }
+1319:     ips200_show_string(0, 16, "init success.");
+1320: }
+1321: 
+1322: void camara_task(void)
+1323: {
+1324:     if(mt9v03x_finish_flag)
+1325:     {
+1326:         mt9v03x_finish_flag = 0;
+1327: 
+1328:         img_threshold = Ostu();
+1329:         find_jidian();
+1330:         image_deal(); /* 基础扫线 */
+1331: 
+1332: 				judge_roundabout_dir(); /* 新增：先预判环岛方向 */
+1333:         zuohuan();
+1334: 				patch_roundabout();
+1335: 				
+1336:         final_mid_line = find_mid_line_weight();
+1337:         mark_frame_processed();
+1338: 
+1339:         if(++skip >= 5) {
+1340:             skip = 0;
+1341: 
+1342:             make_binary_image();
+1343:             ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
+1344:             draw_line();
+1345: 
+1346:             ips200_show_string(10, 160, "mid_value:");
+1347:             ips200_show_uint8(80,160,final_mid_line);
+1348: 						ips200_show_string(10, 190, "state:");
+1349:             ips200_show_uint8(80,190,roundabout_state);
+1350: 						ips200_show_string(10, 280, "island_dir:");
+1351: 						ips200_show_uint8(100, 280, island_dir);
+1352: 						ips200_show_uint8(35,210,exit_pt_x);
+1353: 						ips200_show_uint8(80,210,exit_pt_y);
+1354: 						ips200_show_uint8(35,235,pt_mid_x);
+1355: 						ips200_show_uint8(80,235,pt_mid_y);
+1356: 						ips200_show_uint8(35,260,pt_up_x);
+1357: 						ips200_show_uint8(80,260,pt_up_y);
+1358:         }
+1359:     }
+1360: }
+1361: 
+1362: #elif (IPS200_OR_WIFI == 1)
+1363: 
+1364: #define INCLUDE_BOUNDARY_TYPE   0
+1365: #define WIFI_SSID_TEST          "Car"
+1366: #define WIFI_PASSWORD_TEST      "431431431"
+1367: 
+1368: void camara_init(void)
+1369: {
+1370:     wireless_uart_init();
+1371:     while(wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST)) { system_delay_ms(100); }
+1372:     if(1 != WIFI_SPI_AUTO_CONNECT) {
+1373:         while(wifi_spi_socket_connect("TCP", WIFI_SPI_TARGET_IP, WIFI_SPI_TARGET_PORT, WIFI_SPI_LOCAL_PORT)) { system_delay_ms(100); }
+1374:     }
+1375:     while(mt9v03x_init()) { system_delay_ms(100); }
+1376: 
+1377:     seekfree_assistant_interface_init(SEEKFREE_ASSISTANT_WIFI_SPI);
+1378: #if(0 == INCLUDE_BOUNDARY_TYPE)
+1379:     seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, mt9v03x_image[0], MT9V03X_W, MT9V03X_H);
+1380: #endif
+1381: }
+1382: 
+1383: void camara_task(void)
+1384: {
+1385:     if(mt9v03x_finish_flag)
+1386:     {
+1387:         mt9v03x_finish_flag = 0;  
+1388: 
+1389:         img_threshold = Ostu();
+1390:         find_jidian();
+1391:         image_deal(); /* 基础扫线 */
+1392: 
+1393:         seekfree_assistant_camera_send();
+1394:     }
+1395: }
+1396: #else
+1397: #error "IPS200_OR_WIFI must be 0 (IPS200) or 1 (WiFi)."
+1398: #endif

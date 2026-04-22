@@ -1,0 +1,138 @@
+C251 COMPILER V5.60.0,  encoder                                                            22/04/26  16:39:19  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE encoder
+OBJECT MODULE PLACED IN .\out_file\encoder.obj
+COMPILER INVOKED BY: D:\keil\C251\BIN\C251.EXE encoder.c LARGE FLOAT64 ROM(HUGE) WARNINGLEVEL(3) OPTIMIZE(0,SIZE) BROWSE
+                    - INCDIR(..\..\libraries\zf_common;..\..\libraries\zf_components;..\..\libraries\zf_device;..\..\libraries\zf_driver;..\u
+                    -ser;..\code;..\..\libraries\zf_components\stc32g_usb_lib;..\..\libraries\zf_components\seekfree_assistant) DEBUG PRINT(.
+                    -\out_file\encoder.lst) TABS(2) OBJECT(.\out_file\encoder.obj) 
+
+stmt  level    source
+
+    1          #include "encoder.h"
+    2          #include <stdlib.h> // 需要用到 abs() 绝对值函数
+    3          
+    4          //用于给摄像头算法累计行驶距离的全局变量
+    5          volatile int32 accumulated_distance = 0;
+    6          
+    7          // 编码器引脚定义
+    8          #define ENCODER_QUAD_1      ( PWMA_ENCODER )            
+    9          #define ENCODER_QUAD_1_CHA  ( PWMA_ENCODER_CH1P_P60 )   
+   10          #define ENCODER_QUAD_1_CHB  ( PWMA_ENCODER_CH2P_P62 )   
+   11          
+   12          #define ENCODER_QUAD_2      ( PWMC_ENCODER )            
+   13          #define ENCODER_QUAD_2_CHA  ( PWMC_ENCODER_CH1P_P40 )   
+   14          #define ENCODER_QUAD_2_CHB  ( PWMC_ENCODER_CH2P_P42 )   
+   15          
+   16          // 真正定义这两个速度变量的地方
+   17          int16 left_speed = 0;
+   18          int16 right_speed = 0;
+   19          int16 left_speed_raw = 0;
+   20          int16 right_speed_raw = 0;
+   21          
+   22          // 编码器初始化函数
+   23          void encoder_init(void)
+   24          {
+   25   1          encoder_quad_init(ENCODER_QUAD_1, ENCODER_QUAD_1_CHA, ENCODER_QUAD_1_CHB); 
+   26   1          encoder_quad_init(ENCODER_QUAD_2, ENCODER_QUAD_2_CHA, ENCODER_QUAD_2_CHB); 
+   27   1      }
+   28          
+   29          // 速度更新函数（应该在定时器中断中被调用）
+   30          void encoder_update(void)
+   31          {
+   32   1          left_speed_raw  = encoder_get_count(ENCODER_QUAD_1); // 读取并修正左侧方向
+   33   1          right_speed_raw = -encoder_get_count(ENCODER_QUAD_2);
+   34   1          left_speed =  left_speed_raw;
+   35   1          right_speed = right_speed_raw;
+   36   1        
+   37   1          accumulated_distance += (abs(left_speed_raw) + abs(right_speed_raw)) / 2;
+   38   1      
+   39   1          encoder_clear_count(ENCODER_QUAD_1); // 清空计数
+   40   1          encoder_clear_count(ENCODER_QUAD_2); 
+   41   1      }
+   42          
+   43          int16 Distance_Measure(void)
+   44          {
+   45   1          int16 dist = accumulated_distance;
+   46   1          accumulated_distance = 0; // 读完后清零，相当于测量两次调用之间的距离
+   47   1          return dist;
+   48   1      }
+   49          
+   50          //#include "encoder.h"
+   51          //#include <stdlib.h> // 需要用到 abs()
+   52          
+   53          //volatile int32 accumulated_distance = 0;
+   54          
+   55          //// 【新增】根据你实测的数据，定义最大脉冲数
+   56          //#define MAX_SPEED_PULSES 2000  
+C251 COMPILER V5.60.0,  encoder                                                            22/04/26  16:39:19  PAGE 2   
+
+   57          
+   58          //// 编码器引脚定义 (保持你的原样)
+   59          //#define ENCODER_QUAD_1      ( PWMA_ENCODER )            
+   60          //#define ENCODER_QUAD_1_CHA  ( PWMA_ENCODER_CH1P_P60 )   
+   61          //#define ENCODER_QUAD_1_CHB  ( PWMA_ENCODER_CH2P_P62 )   
+   62          
+   63          //#define ENCODER_QUAD_2      ( PWMC_ENCODER )            
+   64          //#define ENCODER_QUAD_2_CHA  ( PWMC_ENCODER_CH1P_P40 )   
+   65          //#define ENCODER_QUAD_2_CHB  ( PWMC_ENCODER_CH2P_P42 )   
+   66          
+   67          //int16 left_speed = 0;
+   68          //int16 right_speed = 0;
+   69          //int16 left_speed_raw = 0;
+   70          //int16 right_speed_raw = 0;
+   71          
+   72          //void encoder_init(void)
+   73          //{
+   74          //    encoder_quad_init(ENCODER_QUAD_1, ENCODER_QUAD_1_CHA, ENCODER_QUAD_1_CHB); 
+   75          //    encoder_quad_init(ENCODER_QUAD_2, ENCODER_QUAD_2_CHA, ENCODER_QUAD_2_CHB); 
+   76          //}
+   77          
+   78          //void encoder_update(void)
+   79          //{
+   80          //    left_speed_raw  = encoder_get_count(ENCODER_QUAD_1); 
+   81          //    right_speed_raw = -encoder_get_count(ENCODER_QUAD_2);
+   82          //    
+   83          //    // 【核心修改】将原始脉冲映射到 0~90！
+   84          //    // 强制转换为 long 进行运算，防止乘法溢出，算完再转回 int16
+   85          //    left_speed = (int16)(((long)left_speed_raw * 90) / MAX_SPEED_PULSES);
+   86          //    right_speed = (int16)(((long)right_speed_raw * 90) / MAX_SPEED_PULSES);
+   87          //    
+   88          //    // 累加距离还是用原始脉冲比较好，精度高
+   89          //    accumulated_distance += (abs(left_speed_raw) + abs(right_speed_raw)) / 2;
+   90          
+   91          //    encoder_clear_count(ENCODER_QUAD_1); 
+   92          //    encoder_clear_count(ENCODER_QUAD_2); 
+   93          //}
+   94          
+   95          //int16 Distance_Measure(void)
+   96          //{
+   97          //    int16 dist = accumulated_distance;
+   98          //    accumulated_distance = 0; 
+   99          //    return dist;
+  100          //}
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =    ------     ------
+  ecode size           =       202     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =        14     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =        37     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,843 @@
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE camera_new
+OBJECT MODULE PLACED IN .\out_file\camera_new.obj
+COMPILER INVOKED BY: D:\keil\C251\BIN\C251.EXE ..\code\camera_new.c LARGE FLOAT64 ROM(HUGE) WARNINGLEVEL(3) OPTIMIZE(0,S
+                    -IZE) BROWSE INCDIR(..\..\libraries\zf_common;..\..\libraries\zf_components;..\..\libraries\zf_device;..\..\libraries\zf_
+                    -driver;..\user;..\code;..\..\libraries\zf_components\stc32g_usb_lib;..\..\libraries\zf_components\seekfree_assistant) DE
+                    -BUG PRINT(.\out_file\camera_new.lst) TABS(2) OBJECT(.\out_file\camera_new.obj) 
+
+stmt  level    source
+
+    1          #include "camera_new.h"
+    2          #include "zf_common_headfile.h"
+    3          
+    4          
+    5          uint8 buff[2];
+    6          uint8  base_image[MT9V03X_H][MT9V03X_W];
+    7          uint8 img_threshold;
+    8          uint8 left_jidian;
+    9          uint8 right_jidian;
+   10          uint8 left_line_list[MT9V03X_H];
+   11          uint8 right_line_list[MT9V03X_H];
+   12          uint8 mid_line_list[MT9V03X_H];
+   13          //uint8 image[MT9V03X_H][MT9V03X_W];
+   14          
+   15          int16 offset = 0; 
+   16          extern uint8 final_mid_line; // 借用上面定义好的中线变量
+   17          extern uint8 find_mid_line_weight(void); // 声明找中线的函数
+   18          
+   19          //字模函数
+   20          // ====== 3x5 数字字模（每个数字 5 行，每行 3 bit）======
+   21          //static const uint8 digit3x5[10][5] =
+   22          //{
+   23          //    {0x07,0x05,0x05,0x05,0x07}, // 0
+   24          //    {0x02,0x06,0x02,0x02,0x07}, // 1
+   25          //    {0x07,0x01,0x07,0x04,0x07}, // 2
+   26          //    {0x07,0x01,0x07,0x01,0x07}, // 3
+   27          //    {0x05,0x05,0x07,0x01,0x01}, // 4
+   28          //    {0x07,0x04,0x07,0x01,0x07}, // 5
+   29          //    {0x07,0x04,0x07,0x05,0x07}, // 6
+   30          //    {0x07,0x01,0x01,0x01,0x01}, // 7
+   31          //    {0x07,0x05,0x07,0x05,0x07}, // 8
+   32          //    {0x07,0x05,0x07,0x01,0x07}, // 9
+   33          //};
+   34          
+   35          //static void draw_digit_3x5(uint8 img[MT9V03X_H][MT9V03X_W], uint16 x0, uint16 y0, uint8 d, uint8 color)
+   36          //{
+   37          //    uint16 r, c;
+   38          //    uint8 rowBits;
+   39          
+   40          //    if(d > 9) return;
+   41          
+   42          //    for(r = 0; r < 5; r++)
+   43          //    {
+   44          //        rowBits = digit3x5[d][r];      // 低3位有效
+   45          //        for(c = 0; c < 3; c++)
+   46          //        {
+   47          //            if(rowBits & (1 << (2 - c)))
+   48          //            {
+   49          //                if((y0 + r) < MT9V03X_H && (x0 + c) < MT9V03X_W)
+   50          //                {
+   51          //                    img[y0 + r][x0 + c] = color;
+   52          //                }
+   53          //            }
+   54          //        }
+   55          //    }
+   56          //}
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 2   
+
+   57          
+   58          //// 画 0~255（三位数，固定显示为 3 位：例如 5 -> 005）
+   59          //void draw_u8_3digits(uint8 img[MT9V03X_H][MT9V03X_W], uint16 x, uint16 y, uint8 value)
+   60          //{
+   61          //    uint8 h, t, o;
+   62          
+   63          //    h = value / 100;
+   64          //    t = (value / 10) % 10;
+   65          //    o = value % 10;
+   66          
+   67          //    draw_digit_3x5(img, x + 0, y, h, 255);
+   68          //    draw_digit_3x5(img, x + 4, y, t, 255);
+   69          //    draw_digit_3x5(img, x + 8, y, o, 255);
+   70          //}
+   71          
+   72          
+   73          
+   74          //大津
+   75          uint8 Ostu(uint8 index[MT9V03X_H][MT9V03X_W])
+   76          {
+   77   1          uint32 hist[256];
+   78   1          uint32 total;
+   79   1          uint32 sum;
+   80   1          uint32 sumB;
+   81   1          uint32 wB;
+   82   1          uint32 wF;
+   83   1      
+   84   1          float  mB;
+   85   1          float  mF;
+   86   1          float  between;
+   87   1          float  maxBetween;
+   88   1      
+   89   1          uint8  threshold;
+   90   1      
+   91   1          uint16 i;
+   92   1          uint16 x;
+   93   1          uint16 y;
+   94   1          uint16 t;
+   95   1      
+   96   1          // 1) 清直方图
+   97   1          for(i = 0; i < 256; i++)
+   98   1          {
+   99   2              hist[i] = 0;
+  100   2          }
+  101   1      
+  102   1          // 2) 统计直方图（建议 2x2 降采样更快：把 y++/x++ 改成 y+=2/x+=2）
+  103   1          for(y = 0; y < MT9V03X_H; y += 2)
+  104   1          {
+  105   2              for(x = 0; x < MT9V03X_W; x += 2)
+  106   2              {
+  107   3                  hist[index[y][x]]++;
+  108   3              }
+  109   2          }
+  110   1          total = (uint32)(MT9V03X_H / 2) * (uint32)(MT9V03X_W / 2);
+  111   1      
+  112   1          // 3) 全局灰度和
+  113   1          sum = 0;
+  114   1          for(t = 0; t < 256; t++)
+  115   1          {
+  116   2              sum += (uint32)t * hist[t];
+  117   2          }
+  118   1      
+  119   1          // 4) 遍历阈值，最大化类间方差
+  120   1          sumB = 0;
+  121   1          wB = 0;
+  122   1          maxBetween = -1.0f;
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 3   
+
+  123   1          threshold = 0;
+  124   1      
+  125   1          for(t = 0; t < 256; t++)
+  126   1          {
+  127   2              wB += hist[t];
+  128   2              if(wB == 0)
+  129   2              {
+  130   3                  continue;
+  131   3              }
+  132   2      
+  133   2              wF = total - wB;
+  134   2              if(wF == 0)
+  135   2              {
+  136   3                  break;
+  137   3              }
+  138   2      
+  139   2              sumB += (uint32)t * hist[t];
+  140   2      
+  141   2              mB = (float)sumB / (float)wB;
+  142   2              mF = (float)(sum - sumB) / (float)wF;
+  143   2      
+  144   2              between = (float)wB * (float)wF * (mB - mF) * (mB - mF);
+  145   2      
+  146   2              if(between > maxBetween)
+  147   2              {
+  148   3                  maxBetween = between;
+  149   3                  threshold = (uint8)t;
+  150   3              }
+  151   2          }
+  152   1      
+  153   1          return threshold;
+  154   1      }
+  155          
+  156          
+  157          void set_image_twovalues(uint8 value)
+  158          {
+  159   1        uint16 i;
+  160   1        uint16 j;
+  161   1        uint8 temp_value;
+  162   1        for(i=0;i<MT9V03X_H/3;i++)
+  163   1        {
+  164   2          for(j=0;j<MT9V03X_W;j++)
+  165   2          {
+  166   3            temp_value=mt9v03x_image[i][j];
+  167   3            if(temp_value<value+20)
+  168   3            {
+  169   4              base_image[i][j]=0;
+  170   4            }
+  171   3            else
+  172   3            {
+  173   4              base_image[i][j]=255;
+  174   4            }
+  175   3          }
+  176   2        }
+  177   1        for(i=MT9V03X_H/3;i<MT9V03X_H;i++)
+  178   1        {
+  179   2          for(j=0;j<MT9V03X_W;j++)
+  180   2          {
+  181   3            temp_value=mt9v03x_image[i][j];
+  182   3            if(temp_value<value)
+  183   3            {
+  184   4              base_image[i][j]=0;
+  185   4            }
+  186   3            else
+  187   3            {
+  188   4              base_image[i][j]=255;
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 4   
+
+  189   4            }
+  190   3          }
+  191   2        }
+  192   1      }
+  193          
+  194          
+  195          
+  196          
+  197          static uint8 u16_to_str(char *out, uint16 v)
+  198          {
+  199   1          char tmp[6];
+  200   1          uint8 i = 0;
+  201   1          uint8 len = 0;
+  202   1      
+  203   1          if(v == 0)
+  204   1          {
+  205   2              out[0] = '0';
+  206   2              return 1;
+  207   2          }
+  208   1      
+  209   1          while(v && i < 5)
+  210   1          {
+  211   2              tmp[i++] = (char)('0' + (v % 10));
+  212   2              v /= 10;
+  213   2          }
+  214   1      
+  215   1          while(i)
+  216   1          {
+  217   2              out[len++] = tmp[--i];
+  218   2          }
+  219   1          return len;
+  220   1      }
+  221          
+  222          void send_left_right_ascii(uint16 left, uint16 right)
+  223          {
+  224   1          char tx[32];
+  225   1          uint8 p = 0;
+  226   1      
+  227   1          tx[p++] = 'L'; tx[p++] = '=';
+  228   1          p += u16_to_str(&tx[p], left);
+  229   1      
+  230   1          tx[p++] = ' ';
+  231   1          tx[p++] = 'R'; tx[p++] = '=';
+  232   1          p += u16_to_str(&tx[p], right);
+  233   1      
+  234   1          tx[p++] = '\r';
+  235   1          tx[p++] = '\n';
+  236   1      
+  237   1          wireless_uart_send_buffer((uint8*)tx, p);
+  238   1      }
+  239          
+  240          //找基点
+  241          void find_jidian(uint8 index[MT9V03X_H][MT9V03X_W])
+  242          {
+  243   1        uint8 j;
+  244   1        if(index[jidian_search_line-1][MT9V03X_W/2]==255 && index[jidian_search_line - 1][MT9V03X_W/2 + 1]==255 
+             -&& index[jidian_search_line - 1][MT9V03X_W/2 - 1] == 255)
+  245   1        {
+  246   2          for(j=MT9V03X_W/2;j>0;j--)
+  247   2          {
+  248   3            if(index[jidian_search_line-1][j-1]==0 && index[jidian_search_line-1][j]==255 && index[jidian_search_l
+             -ine-1][j+1]==255)
+  249   3            {
+  250   4              left_jidian=j;
+  251   4              break;
+  252   4            }
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 5   
+
+  253   3            if(j-1==1)
+  254   3            {
+  255   4              left_jidian=1;
+  256   4              break;
+  257   4            }
+  258   3          }
+  259   2          for(j=MT9V03X_W/2;j<MT9V03X_W-2;j++)
+  260   2          {
+  261   3            if(index[jidian_search_line-1][j-1]==255 && index[jidian_search_line-1][j]==255 && index[jidian_search
+             -_line-1][j+1]==0)
+  262   3            {
+  263   4              right_jidian=j;
+  264   4              break;
+  265   4            }
+  266   3            if(j+1==MT9V03X_W-2)
+  267   3            {
+  268   4              right_jidian=MT9V03X_W-2;
+  269   4              break;
+  270   4            }
+  271   3          }
+  272   2        }
+  273   1        else if(index[jidian_search_line-1][MT9V03X_W/4]==255 && index[jidian_search_line - 1][MT9V03X_W/4 + 1]=
+             -=255 && index[jidian_search_line - 1][MT9V03X_W/4 - 1] == 255)
+  274   1        {
+  275   2          for(j=MT9V03X_W/4;j>0;j--)
+  276   2          {
+  277   3            if(index[jidian_search_line-1][j-1]==0 && index[jidian_search_line-1][j]==255 && index[jidian_search_l
+             -ine-1][j+1]==255)
+  278   3            {
+  279   4              left_jidian=j;
+  280   4              break;
+  281   4            }
+  282   3            if(j-1==1)
+  283   3            {
+  284   4              left_jidian=1;
+  285   4              break;
+  286   4            }
+  287   3          }
+  288   2          for(j=MT9V03X_W/4;j<MT9V03X_W-2;j++)
+  289   2          {
+  290   3            if(index[jidian_search_line-1][j-1]==255 && index[jidian_search_line-1][j]==255 && index[jidian_search
+             -_line-1][j+1]==0)
+  291   3            {
+  292   4              right_jidian=j;
+  293   4              break;
+  294   4            }
+  295   3            if(j+1==MT9V03X_W-2)
+  296   3            {
+  297   4              right_jidian=MT9V03X_W-2;
+  298   4              break;
+  299   4            }
+  300   3          }
+  301   2        }
+  302   1        else if(index[jidian_search_line-1][MT9V03X_W/4*3]==255 && index[jidian_search_line - 1][MT9V03X_W/4*3 +
+             - 1]==255 && index[jidian_search_line - 1][MT9V03X_W/4*3 - 1] == 255)
+  303   1        {
+  304   2          for(j=MT9V03X_W/4*3;j>0;j--)
+  305   2          {
+  306   3            if(index[jidian_search_line-1][j-1]==0 && index[jidian_search_line-1][j]==255 && index[jidian_search_l
+             -ine-1][j+1]==255)
+  307   3            {
+  308   4              left_jidian=j;
+  309   4              break;
+  310   4            }
+  311   3            if(j-1==1)
+  312   3            {
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 6   
+
+  313   4              left_jidian=1;
+  314   4              break;
+  315   4            }
+  316   3          }
+  317   2          for(j=MT9V03X_W/4*3;j<MT9V03X_W-2;j++)
+  318   2          {
+  319   3            if(index[jidian_search_line-1][j-1]==255 && index[jidian_search_line-1][j]==255 && index[jidian_search
+             -_line-1][j+1]==0)
+  320   3            {
+  321   4              right_jidian=j;
+  322   4              break;
+  323   4            }
+  324   3            if(j+1==MT9V03X_W-2)
+  325   3            {
+  326   4              right_jidian=MT9V03X_W-2;
+  327   4              break;
+  328   4            }
+  329   3          }
+  330   2        }
+  331   1      }
+  332          
+  333          uint8 Limit_uint8(uint8 a,uint8 b, uint8 c)
+  334          {
+  335   1        if((b>=a) && (b<=c))
+  336   1        {
+  337   2          return b;
+  338   2        }
+  339   1        else if(b<a)
+  340   1        {
+  341   2          return a;
+  342   2        }
+  343   1        else if(b>c)
+  344   1        {
+  345   2          return c;
+  346   2        }
+  347   1        return 0;
+  348   1      }
+  349          
+  350          void image_deal(uint8 index[MT9V03X_H][MT9V03X_W])
+  351          {
+  352   1        uint8 left_point = left_jidian;
+  353   1        uint8 right_point = right_jidian;
+  354   1        uint8 left_search_judge;
+  355   1        uint8 mid_start_left_search_judge;
+  356   1        uint8 j,i;
+  357   1        uint8 right_search_judge;
+  358   1        uint8 mid_start_right_search_judge;
+  359   1        for(i = search_start_line -1;i>search_end_line;i--)
+  360   1        {
+  361   2          left_search_judge = 0;
+  362   2          mid_start_left_search_judge=0;
+  363   2          for(j=left_point;j<left_point+left_line_right_scarch;j++)
+  364   2          {
+  365   3            if(index[i][j-1]==0 && index[i][j]==255 && index[i][j+1] ==255)
+  366   3            {
+  367   4              left_point = j;
+  368   4              break;
+  369   4            }
+  370   3            else if(j == MT9V03X_W-2)
+  371   3            {
+  372   4              left_point = MT9V03X_W-5;
+  373   4              break;
+  374   4            }
+  375   3            else if(j==left_point + left_line_right_scarch -1)
+  376   3            {
+  377   4              left_search_judge=1;
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 7   
+
+  378   4              break;
+  379   4            }
+  380   3          }
+  381   2          if(left_search_judge == 1)
+  382   2          {
+  383   3            for(j=left_point;j>left_point-left_line_left_scarch;j--)
+  384   3            {
+  385   4              if(index[i][j-1]==0 && index[i][j]==255 && index[i][j+1]==255 && j<MT9V03X_W-5)
+  386   4              {
+  387   5                left_point = j;
+  388   5                break;
+  389   5              }
+  390   4              else if(j==1)
+  391   4              {
+  392   5                left_point = 1;
+  393   5                mid_start_left_search_judge = 1;
+  394   5                break;
+  395   5              }
+  396   4              else if(j==left_point - left_line_left_scarch + 1)
+  397   4              {
+  398   5                mid_start_left_search_judge = 1;
+  399   5                break;
+  400   5              }
+  401   4            }
+  402   3          }
+  403   2          if(mid_start_left_search_judge == 1)
+  404   2          {
+  405   3            for(j=MID_W;j>0;j--)
+  406   3            {
+  407   4              if(index[i][j-1]==0 && index[i][j]==255 && index[i][j+1]==255)
+  408   4              {
+  409   5                left_point =j;
+  410   5                break;
+  411   5              }
+  412   4              else if(j==1)
+  413   4              {
+  414   5                left_point = 1;
+  415   5                break;
+  416   5              }
+  417   4            }
+  418   3          }
+  419   2          right_search_judge = 0;
+  420   2          mid_start_right_search_judge = 0;
+  421   2          for(j = right_point;j>right_point-right_line_left_scarch;j--)
+  422   2          {
+  423   3            if(index[i][j-1]==255 && index[i][j]==255 && index[i][j+1]==0)
+  424   3            {
+  425   4              right_point = j;
+  426   4              break;
+  427   4            }
+  428   3            else if(j==1)
+  429   3            {
+  430   4              right_point =4;
+  431   4              break;
+  432   4            }
+  433   3            else if(j==right_point-right_line_left_scarch + 1)
+  434   3            {
+  435   4              right_search_judge =1;
+  436   4              break;
+  437   4            }
+  438   3          }
+  439   2          if(right_search_judge ==1)
+  440   2          {
+  441   3            for(j = right_point;j<right_point+right_line_right_scarch;j++)
+  442   3            {
+  443   4              if(index[i][j-1]==255 && index[i][j]==255 && index[i][j+1]==0 && j>4)
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 8   
+
+  444   4              {
+  445   5                right_point = j;
+  446   5                break;
+  447   5              }
+  448   4              else if(j==MT9V03X_W-2)
+  449   4              {
+  450   5                right_point = MT9V03X_W -2;
+  451   5                mid_start_right_search_judge = 1;
+  452   5                break;
+  453   5              }
+  454   4              else if(j==right_point + right_line_right_scarch - 1)
+  455   4              {
+  456   5                mid_start_right_search_judge = 1;
+  457   5                break;
+  458   5              }
+  459   4            }
+  460   3          }
+  461   2          if(mid_start_right_search_judge == 1)
+  462   2          {
+  463   3            for(j = MID_W;j<MT9V03X_W-1;j++)
+  464   3            {
+  465   4              if(index[i][j-1]==255 && index[i][j]==255 && index[i][j+1]==0)
+  466   4              {
+  467   5                right_point = j;
+  468   5                break;
+  469   5              }
+  470   4              else if(j == MT9V03X_W-2)
+  471   4              {
+  472   5                right_point = MT9V03X_W-2;
+  473   5                break;
+  474   5              }
+  475   4            }
+  476   3          }
+  477   2          left_line_list[i]=Limit_uint8(1,left_point,MT9V03X_W-2);
+  478   2          right_line_list[i]=Limit_uint8(1,right_point,MT9V03X_W-2);
+  479   2          mid_line_list[i]=Limit_uint8(1,(left_line_list[i]+right_line_list[i])/2,MT9V03X_W-2);
+  480   2        }
+  481   1      }
+  482          
+  483          
+  484          //权重数组
+  485          //uint8 mid_weight_list[120]=
+  486          //{
+  487          //  1,1,1,1,1,1,1,1,1,1,
+  488          //  1,1,1,1,1,1,1,1,1,1,
+  489          //  1,1,1,1,1,1,1,1,1,1,
+  490          //  1,1,1,1,1,1,1,1,1,1,
+  491          //  1,1,1,1,1,1,1,1,1,1,  
+  492          //  6,6,6,6,6,6,6,6,6,6,
+  493          //  7,8,9,10,11,12,13,14,15,16,
+  494          //  17,18,19,20,20,20,20,19,18,17,
+  495          //  16,15,14,13,12,11,10,9,8,7,
+  496          //  6,6,6,6,6,6,6,6,6,6,
+  497          //  1,1,1,1,1,1,1,1,1,1,
+  498          //  1,1,1,1,1,1,1,1,1,1
+  499          //};
+  500          
+  501          uint8 mid_weight_list[120]=
+  502          {
+  503            1,1,1,1,1,1,1,1,1,1,
+  504            1,1,1,1,1,1,1,1,1,1,
+  505            1,1,1,1,1,1,1,1,1,1,
+  506            6,6,6,12,12,12,12,6,6,6,
+  507            10,10,15,15,15,15,15,15,10,10,           // 30-39
+  508            15,16,17,18,19,20,20,20,20,19, // 40-49行
+  509            18,17,16,15,14,13,12,11,10,9,  // 50-59行
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 9   
+
+  510            8,7,6,6,6,6,6,6,6,6,           // 60-69行
+  511            1,1,1,1,1,1,1,1,1,1,           // 70-79行
+  512            1,1,1,1,1,1,1,1,1,1,
+  513            1,1,1,1,1,1,1,1,1,1,
+  514            1,1,1,1,1,1,1,1,1,1
+  515          };
+  516          
+  517          
+  518          uint8 final_mid_line = MID_W;
+  519          uint8 last_mid_line = MID_W;
+  520          
+  521          uint8 find_mid_line_weight(void)
+  522          {
+  523   1        uint8 mid_line_value = MID_W;
+  524   1        uint8 mid_line = MID_W;
+  525   1        uint32 weight_midline_sum = 0;
+  526   1        uint32 weight_sum = 0;
+  527   1        uint8 i;
+  528   1        for(i=MT9V03X_H-1;i>search_end_line;i--)
+  529   1        {
+  530   2          weight_midline_sum += mid_line_list[i] * mid_weight_list[i];
+  531   2          weight_sum += mid_weight_list[i];
+  532   2        }
+  533   1        mid_line=(uint8)(weight_midline_sum/weight_sum);
+  534   1        mid_line_value=last_mid_line*0.2+mid_line*0.8;
+  535   1        last_mid_line=mid_line_value;
+  536   1        return mid_line_value;
+  537   1      }
+  538          
+  539          void draw_line(void)
+  540          {
+  541   1        uint8 i;
+  542   1        for(i = MT9V03X_H - 1;i>search_end_line;i--)
+  543   1        {
+  544   2          ips200_draw_point(1.125*Limit_uint8(1,left_line_list[i],MT9V03X_W-2),1.125*i,RGB565_BLUE);
+  545   2          ips200_draw_point(1.125*Limit_uint8(1,right_line_list[i],MT9V03X_W-2),1.125*i,RGB565_GREEN);
+  546   2          ips200_draw_point(1.125*Limit_uint8(1,mid_line_list[i],MT9V03X_W-2),1.125*i,RGB565_RED);
+  547   2        }
+  548   1      }
+  549          
+  550          
+  551          // ===================== 模式 0：IPS200屏幕显示 =====================
+  552          #if (IPS200_OR_WIFI == 0)
+  553          
+  554          
+  555          void camara_init(void)
+  556          {
+  557   1          
+  558   1          ips200_init();
+  559   1          ips200_show_string(0, 0, "mt9v03x init.");
+  560   1      
+  561   1          while(1)
+  562   1          {
+  563   2              system_delay_ms(100);
+  564   2              if(mt9v03x_init())
+  565   2              {
+  566   3                  ips200_show_string(0, 16, "mt9v03x reinit.");
+  567   3              }
+  568   2              else
+  569   2              {
+  570   3                  break;
+  571   3              }
+  572   2          }
+  573   1      
+  574   1          ips200_show_string(0, 16, "init success.");
+  575   1      }
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 10  
+
+  576          
+  577          //void camara_task(void)
+  578          //{
+  579          //    if(mt9v03x_finish_flag)
+  580          //    {
+  581          //        mt9v03x_finish_flag = 0;
+  582          
+  583          //        /* 1) 备份原图到 base_image */
+  584          //        memcpy(base_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
+  585          
+  586          //        /* 2) 大津阈值 + 二值化到 base_image */
+  587          //        img_threshold = Ostu(mt9v03x_image);
+  588          //        set_image_twovalues(img_threshold);
+  589          
+  590          //        /* 3) 找基点 + 搜线（使用二值图 base_image） */
+  591          //        find_jidian(base_image);
+  592          //        image_deal(base_image);
+  593          //        
+  594          //        final_mid_line = find_mid_line_weight();
+  595          //        ips200_show_uint8(10,180,final_mid_line);
+  596          //        /* 4) 显示处理后的图像（base_image） */
+  597          //        ips200_show_gray_image(0,0,base_image[0], MT9V03X_W, MT9V03X_H,211, 135,0);
+  598          //        draw_line();
+  599          //    }
+  600          //}
+  601          
+  602          void camara_task(void)
+  603          {
+  604   1          if(mt9v03x_finish_flag)
+  605   1          {
+  606   2              mt9v03x_finish_flag = 0;
+  607   2      
+  608   2              // 1. 图像备份与处理
+  609   2              memcpy(base_image[0], mt9v03x_image[0], MT9V03X_IMAGE_SIZE);
+  610   2              img_threshold = Ostu(mt9v03x_image);
+  611   2              set_image_twovalues(img_threshold);
+  612   2              find_jidian(base_image);
+  613   2              image_deal(base_image);
+  614   2              
+  615   2              // 2. 调用加权中线算法
+  616   2              final_mid_line = find_mid_line_weight();
+  617   2              
+  618   2              // 3. 计算 offset 给舵机用
+  619   2              offset = final_mid_line - MID_W; 
+  620   2              
+  621   2              // 4. 【修复重点】把屏幕显示的函数加回来！
+  622   2              ips200_show_gray_image(0, 0, base_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
+  623   2              draw_line(); // 画出红绿蓝三条线
+  624   2              ips200_show_uint8(10, 180, final_mid_line); // 在屏幕角落显示中线数值
+  625   2          }
+  626   1      }
+  627          
+  628          // ===================== 模式 1：WiFi SPI 图传 =====================
+  629          #elif (IPS200_OR_WIFI == 1)
+               
+               // 0/1/2/3/4 跟你原来一样
+               #define INCLUDE_BOUNDARY_TYPE   0
+               
+               #define WIFI_SSID_TEST          "Redmi K70 Ultra"
+               #define WIFI_PASSWORD_TEST      "12345678"
+               
+               // 边界数组
+               #define BOUNDARY_NUM            (MT9V03X_H * 3 / 2)
+               
+               static uint8 xy_x1_boundary[BOUNDARY_NUM], xy_x2_boundary[BOUNDARY_NUM], xy_x3_boundary[BOUNDARY_NUM];
+               static uint8 xy_y1_boundary[BOUNDARY_NUM], xy_y2_boundary[BOUNDARY_NUM], xy_y3_boundary[BOUNDARY_NUM];
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 11  
+
+               
+               static uint8 x1_boundary[MT9V03X_H], x2_boundary[MT9V03X_H], x3_boundary[MT9V03X_H];
+               static uint8 y1_boundary[MT9V03X_W], y2_boundary[MT9V03X_W], y3_boundary[MT9V03X_W];
+               
+               // 图像缓冲：发送前备份避免撕裂
+               //static uint8 far base_image[MT9V03X_H][MT9V03X_W];
+               
+               void camara_init(void)
+               {
+                   wireless_uart_init();
+               #if(1 == INCLUDE_BOUNDARY_TYPE || 2 == INCLUDE_BOUNDARY_TYPE || 4 == INCLUDE_BOUNDARY_TYPE)
+                   int32 i = 0;
+               #elif(3 == INCLUDE_BOUNDARY_TYPE)
+                   int32 j = 0;
+               #endif
+                   
+                   // 1) WiFi 初始化
+                   while(wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST))
+                   {
+                       printf("\r\n connect wifi failed. \r\n");
+                       system_delay_ms(100);
+                   }
+               
+                   printf("\r\n module version:%s", wifi_spi_version);
+                   printf("\r\n module mac    :%s", wifi_spi_mac_addr);
+                   printf("\r\n module ip     :%s", wifi_spi_ip_addr_port);
+               
+                   // 2) TCP 连接（若没开自动连接）
+                   if(1 != WIFI_SPI_AUTO_CONNECT)
+                   {
+                       while(wifi_spi_socket_connect("TCP",
+                                                     WIFI_SPI_TARGET_IP,
+                                                     WIFI_SPI_TARGET_PORT,
+                                                     WIFI_SPI_LOCAL_PORT))
+                       {
+                           printf("\r\n Connect TCP Servers error, try again.");
+                           system_delay_ms(100);
+                       }
+                   }
+               
+                   // 3) 摄像头初始化
+                   while(mt9v03x_init())
+                   {
+                       system_delay_ms(100);
+                       printf("\r\n mt9v03x_init error, try again.");
+                   }
+               
+                   // 4) 逐飞助手接口初始化（WiFi SPI）
+                   seekfree_assistant_interface_init(SEEKFREE_ASSISTANT_WIFI_SPI);
+               
+                   // 5) 配置发送内容（图像/边线）
+               #if(0 == INCLUDE_BOUNDARY_TYPE)
+                   seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, base_image[0], MT9V03X_W, MT
+             -9V03X_H);
+               
+               #elif(1 == INCLUDE_BOUNDARY_TYPE)
+                   for(i = 0; i < MT9V03X_H; i++)
+                   {
+                       x1_boundary[i] = 70 - (70 - 20) * i / MT9V03X_H;
+                       x2_boundary[i] = MT9V03X_W / 2;
+                       x3_boundary[i] = 118 + (168 - 118) * i / MT9V03X_H;
+                   }
+                   seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, base_image[0], MT9V03X_W, MT
+             -9V03X_H);
+                   seekfree_assistant_camera_boundary_config(X_BOUNDARY, MT9V03X_H, x1_boundary, x2_boundary, x3_boundar
+             -y, NULL, NULL, NULL);
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 12  
+
+               
+               #elif(2 == INCLUDE_BOUNDARY_TYPE)
+                   for(i = 0; i < MT9V03X_W; i++)
+                   {
+                       y1_boundary[i] = i * MT9V03X_H / MT9V03X_W;
+                       y2_boundary[i] = MT9V03X_H / 2;
+                       y3_boundary[i] = (MT9V03X_W - i) * MT9V03X_H / MT9V03X_W;
+                   }
+                   seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, base_image[0], MT9V03X_W, MT
+             -9V03X_H);
+                   seekfree_assistant_camera_boundary_config(Y_BOUNDARY, MT9V03X_W, NULL, NULL, NULL, y1_boundary, y2_bo
+             -undary, y3_boundary);
+               
+               #elif(3 == INCLUDE_BOUNDARY_TYPE)
+                   j = 0;
+                   for(i = MT9V03X_H - 1; i >= MT9V03X_H / 2; i--)
+                   {
+                       xy_x1_boundary[j] = 34; xy_y1_boundary[j] = i;
+                       xy_x2_boundary[j] = 47; xy_y2_boundary[j] = i;
+                       xy_x3_boundary[j] = 60; xy_y3_boundary[j] = i;
+                       j++;
+                   }
+                   // 下面弯道/回弯部分按你原代码继续填...
+                   seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, base_image[0], MT9V03X_W, MT
+             -9V03X_H);
+                   seekfree_assistant_camera_boundary_config(XY_BOUNDARY, BOUNDARY_NUM,
+                                                             xy_x1_boundary, xy_x2_boundary, xy_x3_boundary,
+                                                             xy_y1_boundary, xy_y2_boundary, xy_y3_boundary);
+               
+               #elif(4 == INCLUDE_BOUNDARY_TYPE)
+                   for(i = 0; i < MT9V03X_H; i++)
+                   {
+                       x1_boundary[i] = 70 - (70 - 20) * i / MT9V03X_H;
+                       x2_boundary[i] = MT9V03X_W / 2;
+                       x3_boundary[i] = 118 + (168 - 118) * i / MT9V03X_H;
+                   }
+                   seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, NULL, MT9V03X_W, MT9V03X_H);
+                   seekfree_assistant_camera_boundary_config(X_BOUNDARY, MT9V03X_H, x1_boundary, x2_boundary, x3_boundar
+             -y, NULL, NULL, NULL);
+               #endif
+               }
+               
+               void camara_task(void)
+               {
+                   if(mt9v03x_finish_flag)
+                   {
+                       mt9v03x_finish_flag = 0;
+               
+                       memcpy(base_image[0],mt9v03x_image[0],MT9V03X_IMAGE_SIZE);
+                       img_threshold = Ostu(mt9v03x_image);
+                       set_image_twovalues(img_threshold);
+                       find_jidian(base_image);
+                       image_deal(base_image);
+               //        wifi_overlay_left_mid_right_gray(base_image, (uint8)(search_start_line - 1), (uint8)search_end_line
+             -);
+               //        printf("left=%d right=%d\r\n",left_jidian, right_jidian);
+                       send_left_right_ascii(left_jidian, right_jidian);
+               //        draw_u8_3digits(base_image, 0, 0, img_threshold);
+                       // TODO: 你的图像算法处理放这里（阈值/二值化/搜线/输出边线数组等）
+               
+                       seekfree_assistant_camera_send();
+                   }
+               }
+               
+               #else
+               #error "IPS200_OR_WIFI must be 0 (IPS200) or 1 (WiFi)."
+C251 COMPILER V5.60.0,  camera_new                                                         29/03/26  21:18:20  PAGE 13  
+
+               #endif
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =    ------     ------
+  ecode size           =      5752     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =     24211     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =       188     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

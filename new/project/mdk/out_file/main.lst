@@ -1,0 +1,147 @@
+C251 COMPILER V5.60.0,  main                                                               22/04/26  16:39:20  PAGE 1   
+
+
+C251 COMPILER V5.60.0, COMPILATION OF MODULE main
+OBJECT MODULE PLACED IN .\out_file\main.obj
+COMPILER INVOKED BY: D:\keil\C251\BIN\C251.EXE ..\user\main.c LARGE FLOAT64 ROM(HUGE) WARNINGLEVEL(3) OPTIMIZE(0,SIZE) B
+                    -ROWSE INCDIR(..\..\libraries\zf_common;..\..\libraries\zf_components;..\..\libraries\zf_device;..\..\libraries\zf_driver
+                    -;..\user;..\code;..\..\libraries\zf_components\stc32g_usb_lib;..\..\libraries\zf_components\seekfree_assistant) DEBUG PR
+                    -INT(.\out_file\main.lst) TABS(2) OBJECT(.\out_file\main.obj) 
+
+stmt  level    source
+
+    1          #include "zf_common_headfile.h"
+    2          #include "camera.h"
+    3          #include "control.h"
+    4          #include "servo.h"
+    5          #include "motor.h"
+    6          #include <stdio.h>
+    7          #include "encoder.h"
+    8          #include "pid.h"
+    9          #include "brushless.h"
+   10          #include <string.h>
+   11          #define WIFI_SSID_TEST "Car"
+   12          #define WIFI_PASSWORD_TEST "431431431"
+   13          
+   14          //void main(void)
+   15          //{
+   16          //    char debug_str[64];
+   17          //    clock_init(SYSTEM_CLOCK_96M);
+   18          //    debug_init();
+   19          
+   20          //    //初始化
+   21          //    motor_init();
+   22          //    encoder_init();
+   23          //    servo_init();   // 初始化舵机 (中值归位)
+   24          //    control_init(); // 初始化 PID 参数
+   25          //    fan_init();
+   26          //    ips200_init();
+   27          
+   28          //    // 开启定时器中断
+   29          //    pit_ms_init(TIM0_PIT, 20, control_loop);
+   30          //    EA = 1;
+   31          
+   32          //    // 通信和摄像头初始化
+   33          ////    while (wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST))
+   34          ////    {
+   35          ////        system_delay_ms(100);
+   36          ////    }
+   37          
+   38          ////    if (1 != WIFI_SPI_AUTO_CONNECT)
+   39          ////    {
+   40          ////        while (wifi_spi_socket_connect("TCP", WIFI_SPI_TARGET_IP, WIFI_SPI_TARGET_PORT, WIFI_SPI_LOCA
+             -L_PORT))
+   41          ////        {
+   42          ////            system_delay_ms(100);
+   43          ////        }
+   44          ////    }
+   45          
+   46          //    while (mt9v03x_init())
+   47          //    {
+   48          //        system_delay_ms(100);
+   49          //    }
+   50          
+   51          //    if (wireless_uart_init())
+   52          //    {
+   53          //    }
+   54          //    //wireless_uart_send_string("System Init OK!\r\n");
+   55          
+C251 COMPILER V5.60.0,  main                                                               22/04/26  16:39:20  PAGE 2   
+
+   56          //    while (1)
+   57          //    {
+   58          //        camara_task();
+   59          
+   60          //        if (print_flag)
+   61          //        {
+   62          //            print_flag = 0;
+   63          //            // 打印：设定速度、当前速度、PID算出的PWM占空比
+   64          //            sprintf(debug_str, "%d,%d,%d\n", target_speed_base, left_speed, right_speed);
+   65          //            wireless_uart_send_string(debug_str);
+   66          //        }
+   67          //        //set_motor_speed(10,10);
+   68          //    }
+   69          //}
+   70          
+   71          void main(void)
+   72          {
+   73   1          char debug_str[64];
+   74   1          clock_init(SYSTEM_CLOCK_96M);
+   75   1          debug_init();
+   76   1      
+   77   1          // 2. 依次初始化各个硬件模块
+   78   1          motor_init();
+   79   1          encoder_init();
+   80   1          servo_init();   
+   81   1          control_init(); 
+   82   1          fan_init();
+   83   1          imu660ra_init();
+   84   1          //wireless_uart_init(); //2026.4.18注释这里
+   85   1          
+   86   1          camara_init(); 
+   87   1      
+   88   1          // 开启定时器中断 (20ms周期)
+   89   1          pit_ms_init(TIM0_PIT, 20, control_loop);
+   90   1          EA = 1;
+   91   1      
+   92   1          while (1)
+   93   1          {
+   94   2              // 3. 循环执行图像处理任务
+   95   2              camara_task();
+   96   2              set_fan_speed(800,800);
+   97   2              if (print_flag)
+   98   2              {
+   99   3                  print_flag = 0;
+  100   3                  //sprintf(debug_str, "%d,%d,%d,%d\n", left_target_pulses,right_target_pulses, left_speed, right_spe
+             -ed);//2026.4.18注释这里
+  101   3                  //wireless_uart_send_string(debug_str);//2026.4.18注释这里
+  102   3              }
+  103   2          }
+  104   1      }
+*** WARNING C47 IN LINE 73 OF ..\user\main.c: 'debug_str': unreferenced local variable
+
+
+Module Information          Static   Overlayable
+------------------------------------------------
+  code size            =    ------     ------
+  ecode size           =       182     ------
+  data size            =    ------     ------
+  idata size           =    ------     ------
+  pdata size           =    ------     ------
+  xdata size           =    ------     ------
+  xdata-const size     =    ------     ------
+  edata size           =    ------     ------
+  bit size             =    ------     ------
+  ebit size            =    ------     ------
+  bitaddressable size  =    ------     ------
+  ebitaddressable size =    ------     ------
+C251 COMPILER V5.60.0,  main                                                               22/04/26  16:39:20  PAGE 3   
+
+  far data size        =    ------     ------
+  huge data size       =    ------     ------
+  const size           =    ------     ------
+  hconst size          =         2     ------
+End of Module Information.
+
+
+C251 COMPILATION COMPLETE.  1 WARNING(S),  0 ERROR(S)
