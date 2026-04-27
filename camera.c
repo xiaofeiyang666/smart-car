@@ -101,12 +101,15 @@ void my_fps_timer_callback(void)
     }
 }
 
-/* ===================== Ostu ===================== */
+/* ===================== Ostu (兼容 C51 修复版) ===================== */
 uint8 Ostu(void)
 {
     uint16 hist[256] = {0};
     uint32 total, sum = 0, sumB = 0, wB = 0, wF = 0;
-    float mB, mF, diff, between, maxBetween = -1.0f;
+    
+    // 换回 float，因为 C51 无法使用 64 位整数防溢出
+    float mB, mF, diff, between, maxBetween = -1.0f; 
+    
     uint8 threshold = 0;
     uint16 i, x, y;
 
@@ -138,16 +141,28 @@ uint8 Ostu(void)
         }
     }
     return threshold;
-}
+} 
 
-/* ===================== 快照生成函数 ===================== */
+/* ===================== 快照生成函数 (极速剥离版) ===================== */
 static void make_binary_image(void)
 {
     uint16 y, x;
-    for (y = 0; y < MT9V03X_H; y++) {
+    // 提前计算好两个区域的固定阈值，坚决不放在循环里算！
+    uint8 thresh_top = (img_threshold > 235) ? 255 : (img_threshold + 20);
+    uint8 thresh_bot = img_threshold;
+    uint16 limit_y = MT9V03X_H / 3;
+
+    // 上 1/3 区域
+    for (y = 0; y < limit_y; y++) {
         for (x = 0; x < MT9V03X_W; x++) {
-            // 使用原始灰度图生成二值化数组快照
-            bin_image[y][x] = RAW_IS_WHITE(y, x) ? 255 : 0;
+            bin_image[y][x] = (mt9v03x_image[y][x] >= thresh_top) ? 255 : 0;
+        }
+    }
+    
+    // 下 2/3 区域
+    for (y = limit_y; y < MT9V03X_H; y++) {
+        for (x = 0; x < MT9V03X_W; x++) {
+            bin_image[y][x] = (mt9v03x_image[y][x] >= thresh_bot) ? 255 : 0;
         }
     }
 }
@@ -214,18 +229,21 @@ void find_jidian(void)
 }
 
 /* =======================================================================
- * 八邻域边界跟踪算法 (8-Neighborhood Edge Tracking) - 防竖线修复版
+ * 八邻域边界跟踪算法 (绝不造假、斜率顺延修复版)
  * ======================================================================= */
 void image_deal(void)
 {
-    /* --- 1. 变量声明 (C89标准) --- */
     int i;
     int start_left_x, start_right_x, start_y;
     int curr_x, curr_y, curr_dir;
     int search_dir, found, start_search;
     int nx, ny;
+    
+    // 用于斜率延展填补的变量
+    int l_slope = 0, r_slope = 0;
+    int l_valid_y = -1, r_valid_y = -1;
+    int new_x;
 
-    /* --- 2. 初始化数组 --- */
     for (i = 0; i < MT9V03X_H; i++) {
         left_line_list[i] = 255;
         right_line_list[i] = 255;
@@ -234,7 +252,6 @@ void image_deal(void)
     left_pts_cnt = 0;
     right_pts_cnt = 0;
 
-    /* --- 3. 获取起点 --- */
     start_left_x = left_jidian;
     start_right_x = right_jidian;
     start_y = jidian_search_line - 1;
@@ -245,58 +262,47 @@ void image_deal(void)
     /* ---------------- 左边缘八邻域爬行 ---------------- */
     curr_x = start_left_x;
     curr_y = start_y;
-    curr_dir = 0; /* 初始方向：向上 */
+    curr_dir = 0; 
 
     while (left_pts_cnt < MT9V03X_H * 3) {
-        /* 记录点集供高级算法使用 */
         left_pts_x[left_pts_cnt] = curr_x;
         left_pts_y[left_pts_cnt] = curr_y;
         left_pts_dir[left_pts_cnt] = curr_dir;
         left_pts_cnt++;
 
-        /* 映射到一维数组 (左线找最小值，覆盖更新！) */
+        /* ?? 修复漏洞一：白点验真护甲！只有真正在赛道上的点才允许写入数组！ */
         if (curr_y >= 0 && curr_y < MT9V03X_H) {
-            // 如果还没记录过，或者找到了更靠左(更小)的坐标，直接覆盖！
-            if (left_line_list[curr_y] == 255 || curr_x < left_line_list[curr_y]) {
-                left_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+            if (IS_WHITE(curr_y, curr_x)) { // 绝不允许记录盲走时的黑点！
+                if (left_line_list[curr_y] == 255 || curr_x < left_line_list[curr_y]) {
+                    left_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+                }
             }
         }
 
-        /* 只有到达图像顶端才结束爬行 */
         if (curr_y <= search_end_line) break;
 
-        /* 寻找下一个边缘点 (向左转90度开始，扫6个方向防止倒退) */
         found = 0;
         start_search = (curr_dir + 6) % 8; 
         
         for (i = 0; i < 6; i++) {
-            search_dir = (start_search + i) % 8; /* 顺时针扫 */
+            search_dir = (start_search + i) % 8; 
             nx = curr_x + dir_x[search_dir];
             ny = curr_y + dir_y[search_dir];
 
-            /* 允许贴着屏幕边缘走，不触发 break */
             if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
                 if (IS_WHITE(ny, nx)) {
-                    curr_x = nx;
-                    curr_y = ny;
-                    curr_dir = search_dir;
-                    found = 1;
-                    break;
+                    curr_x = nx; curr_y = ny; curr_dir = search_dir; found = 1; break;
                 }
             }
         }
         
-        /* 【防呆机制】如果进入纯黑死胡同，强制向上走一步，防止死循环 */
-        if (!found) {
-            curr_y--;
-            curr_dir = 0;
-        }
+        if (!found) { curr_y--; curr_dir = 0; }
     }
 
     /* ---------------- 右边缘八邻域爬行 ---------------- */
     curr_x = start_right_x;
     curr_y = start_y;
-    curr_dir = 0; /* 初始方向：向上 */
+    curr_dir = 0; 
 
     while (right_pts_cnt < MT9V03X_H * 3) {
         right_pts_x[right_pts_cnt] = curr_x;
@@ -304,89 +310,92 @@ void image_deal(void)
         right_pts_dir[right_pts_cnt] = curr_dir;
         right_pts_cnt++;
 
-        /* 映射到一维数组 (右线找最大值，覆盖更新！) */
+        /* ?? 修复漏洞一：白点验真护甲！ */
         if (curr_y >= 0 && curr_y < MT9V03X_H) {
-            // 如果还没记录过，或者找到了更靠右(更大)的坐标，直接覆盖！
-            if (right_line_list[curr_y] == 255 || curr_x > right_line_list[curr_y]) {
-                right_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+            if (IS_WHITE(curr_y, curr_x)) {
+                if (right_line_list[curr_y] == 255 || curr_x > right_line_list[curr_y]) {
+                    right_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+                }
             }
         }
 
         if (curr_y <= search_end_line) break;
 
         found = 0;
-        start_search = (curr_dir + 2) % 8; /* 向右转90度开始 */
+        start_search = (curr_dir + 2) % 8; 
         
         for (i = 0; i < 6; i++) {
-            search_dir = (start_search + 8 - i) % 8; /* 逆时针扫 */
+            search_dir = (start_search + 8 - i) % 8; 
             nx = curr_x + dir_x[search_dir];
             ny = curr_y + dir_y[search_dir];
 
             if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
                 if (IS_WHITE(ny, nx)) {
-                    curr_x = nx;
-                    curr_y = ny;
-                    curr_dir = search_dir;
-                    found = 1;
-                    break;
+                    curr_x = nx; curr_y = ny; curr_dir = search_dir; found = 1; break;
                 }
             }
         }
         
-        if (!found) {
-            curr_y--;
-            curr_dir = 0;
-        }
+        if (!found) { curr_y--; curr_dir = 0; }
     }
 
-			/* ---------------- 赛道空缺填补与中线计算 ---------------- */
+    /* ---------------- 赛道空缺填补 (斜率顺延法取代垂直拉伸) ---------------- */
     for (i = search_start_line - 1; i > search_end_line; i--) {
         
-        /* 1. 处理完全没扫到线的空白点 (255) */
+        /* ?? 修复漏洞二：左线斜率动态顺延 */
         if (left_line_list[i] == 255) {
-            left_line_list[i] = (i < search_start_line - 1) ? left_line_list[i + 1] : 1;
+            if (i < search_start_line - 1) {
+                // 提取下方最后 5 个合法点的斜率，顺着真实的弯曲趋势往上补！
+                if (l_valid_y == -1) {
+                    l_valid_y = i + 1;
+                    if (l_valid_y + 5 < MT9V03X_H && left_line_list[l_valid_y + 5] != 255) {
+                        l_slope = ((left_line_list[l_valid_y] - left_line_list[l_valid_y + 5]) << 8) / 5;
+                    } else { l_slope = 0; }
+                }
+                new_x = left_line_list[l_valid_y] + ((l_slope * (l_valid_y - i)) >> 8);
+                left_line_list[i] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+            } else {
+                left_line_list[i] = 1;
+            }
+        } else {
+            l_valid_y = -1; // 遇到健康点，重置锚点
         }
+
+        /* ?? 修复漏洞二：右线斜率动态顺延 */
         if (right_line_list[i] == 255) {
-            right_line_list[i] = (i < search_start_line - 1) ? right_line_list[i + 1] : MT9V03X_W - 2;
+            if (i < search_start_line - 1) {
+                if (r_valid_y == -1) {
+                    r_valid_y = i + 1;
+                    if (r_valid_y + 5 < MT9V03X_H && right_line_list[r_valid_y + 5] != 255) {
+                        r_slope = ((right_line_list[r_valid_y] - right_line_list[r_valid_y + 5]) << 8) / 5;
+                    } else { r_slope = 0; }
+                }
+                new_x = right_line_list[r_valid_y] + ((r_slope * (r_valid_y - i)) >> 8);
+                right_line_list[i] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+            } else {
+                right_line_list[i] = MT9V03X_W - 2;
+            }
+        } else {
+            r_valid_y = -1; 
         }
-        
+
         left_line_raw[i] = left_line_list[i];
 
-        /* ==========================================
-         * ??? 【新增】：S弯防串线护甲 (放在 255 填补后，中线计算前)
-         * ========================================== */
-        // 如果左线跑到右线脸上了，或者越界跑到右边去了
-        if (left_line_list[i] >= right_line_list[i] - 5) {
-            
-            // 毫不犹豫，直接把这根发疯的左线“击毙”，锁死在屏幕最左边！
-            left_line_list[i] = 1; 
-            
-            // （同理，如果你怕右线发疯跑向左边，也可以顺手加上下面这句）
-//             else if (right_line_list[i] <= left_line_list[i] + 5) {
-//                 right_line_list[i] = MT9V03X_W - 2;
-//             }
+        /* ?? 修复漏洞三：去除了粗暴的防串线置 1 逻辑，改用柔和限幅 */
+        if (left_line_list[i] >= right_line_list[i] - 3) {
+            int mid_temp = (left_line_list[i] + right_line_list[i]) / 2;
+            left_line_list[i] = Limit_uint8(1, mid_temp - 2, MT9V03X_W - 2);
+            right_line_list[i] = Limit_uint8(1, mid_temp + 2, MT9V03X_W - 2);
         }
 
-        /* ==========================================
-         * ??? 【核心逻辑】：纯中线单边补偿逻辑 (保留自然边线版)
-         * ========================================== */
+        /* 中线单边补偿计算 */
         {
             int half_track = 50; 
-
-            // 情况 A：左边丢线 (贴紧左边缘 <= 2)，但右边有效！
-            // ?? 【精妙之处】：如果上面触发了防串线护甲，左线变成了 1，
-            // 这里就会被完美捕捉，直接进入单边补偿，用健康的右线去算出完美中线！
             if (left_line_list[i] <= 2 && right_line_list[i] < MT9V03X_W - 5) {
                 mid_line_list[i] = Limit_uint8(1, right_line_list[i] - half_track, MT9V03X_W - 2);
-            }
-            
-            // 情况 B：右边丢线 (贴紧右边缘 >= MT9V03X_W - 3)，但左边有效！
-            else if (right_line_list[i] >= MT9V03X_W - 3 && left_line_list[i] > 2) {
+            } else if (right_line_list[i] >= MT9V03X_W - 3 && left_line_list[i] > 2) {
                 mid_line_list[i] = Limit_uint8(1, left_line_list[i] + half_track, MT9V03X_W - 2);
-            }
-            
-            // 情况 C：双边都有效，老老实实取平均值
-            else {
+            } else {
                 mid_line_list[i] = Limit_uint8(1, (left_line_list[i] + right_line_list[i]) / 2, MT9V03X_W - 2);
             }
         }
@@ -609,7 +618,7 @@ void zuohuan(void)
     int  y, step, s, found;
     int idx_A = -1, idx_B = -1;
     int y_ref, x_ref, predict_x;
-    float k_slope;
+    int k_slope;
     int land_x = -1, land_y = -1;
     int curr_x, curr_y, curr_dir;
     int max_x = 0, max_y = 0;
@@ -716,9 +725,9 @@ void zuohuan(void)
 								idx_A = -1; // 左线无效，避免斜率乱飞
 						}
 				}
-        k_slope = (float)(pt_down_x - x_ref) / ((float)(pt_down_y - y_ref) + 0.001f); 
+        k_slope = ((pt_down_x - x_ref) << 8) / (pt_down_y - y_ref); 
         for (y = pt_down_y - 2; y > 10; y--) {
-            predict_x = pt_down_x + (int)(k_slope * (float)(y - pt_down_y));
+            predict_x = pt_down_x + ((k_slope * (y - pt_down_y))>>8);
             if (predict_x < 3) predict_x = 3;
             if (predict_x > MT9V03X_W - 2) predict_x = MT9V03X_W - 2;
             
@@ -1008,15 +1017,7 @@ void zuohuan(void)
             exit_pt_y = best_y;
         }
 
-        /* --------------------------------------------------
-         * 出岛切线预判
-         * -------------------------------------------------- */
-        if (exit_pt_x != 0) {
-            /* 在状态 4 下看见点，立刻切入状态 5 准备拉线！ */
-            if (roundabout_state == 4) {
-                roundabout_state = 5; 
-            }
-        }
+        
     }
 		
 		
@@ -1052,6 +1053,17 @@ void zuohuan(void)
             roundabout_state = 4; // 切入状态 4：环内巡航
         }
     }
+		
+		/* --------------------------------------------------
+         * 出岛切线预判
+         * -------------------------------------------------- */
+		 else if(roundabout_state == 4) {
+            /* 在状态 4 下看见点，立刻切入状态 5 准备拉线！ */
+					if (exit_pt_x != 0) {
+                roundabout_state = 5; 
+            }
+        }
+		
 		/* ==========================================
      * 狀態 5 退出邏輯：出島點丟失 -> 進入狀態 6
      * ========================================== */
@@ -1115,15 +1127,15 @@ void zuohuan(void)
 void patch_roundabout(void)
 {
     int r, new_x;
-    float slope;
+    int slope;
 	
     // --- 状态 1：正常的 A-B 补线 ---
     if (roundabout_state == R_IN_PATCH) {
         if (pt_down_x > 0 && pt_mid_x > 0 && pt_down_y != pt_mid_y) {
-            slope = (float)((int)pt_down_x - (int)pt_mid_x) / (float)((int)pt_down_y - (int)pt_mid_y);
-            for (r = pt_down_y; r >= (int)pt_mid_y; r--) {
-                new_x = (int)pt_down_x - (int)(slope * (float)((int)pt_down_y - r));
-                left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+            slope = (((int)pt_down_x - (int)pt_mid_x) << 8) / ((int)pt_down_y - (int)pt_mid_y);
+						for (r = pt_down_y; r >= (int)pt_mid_y; r--) {
+								new_x = (int)pt_down_x - ((slope * ((int)pt_down_y - r)) >> 8);
+								left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
             }
         }
@@ -1132,9 +1144,9 @@ void patch_roundabout(void)
     // --- 状态 2：A 消失，从 B 点直接连到屏幕左下角 ---
     else if (roundabout_state == R_A_LOST) {
         if (pt_mid_x > 0 && pt_mid_y < MT9V03X_H - 1) { 
-            slope = (float)(1 - (int)pt_mid_x) / (float)((MT9V03X_H - 1) - (int)pt_mid_y);
-            for (r = pt_mid_y; r < MT9V03X_H; r++) {
-                new_x = (int)pt_mid_x + (int)(slope * (float)(r - (int)pt_mid_y));
+            slope = ((1 - (int)pt_mid_x) << 8) / ((MT9V03X_H - 1) - (int)pt_mid_y);
+						for (r = pt_mid_y; r < MT9V03X_H; r++) {
+								new_x = (int)pt_mid_x + ((slope * (r - (int)pt_mid_y)) >> 8);
                 left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
             }
@@ -1486,7 +1498,7 @@ uint8 find_mid_line_weight(void)
         weight_sum += mid_weight_list[i];
     }
     mid_line=(uint8)(weight_midline_sum/weight_sum);
-    mid_line_value=last_mid_line*0.05+mid_line*0.95;
+    mid_line_value = (last_mid_line * 5 + mid_line * 95) / 100;
     last_mid_line=mid_line_value;
     return mid_line_value;
 }
@@ -1609,6 +1621,7 @@ void camara_task(void)
         mt9v03x_finish_flag = 0;
 
         img_threshold = Ostu();
+				make_binary_image();
         find_jidian();
         image_deal(); /* 基础扫线 */
 
@@ -1616,6 +1629,7 @@ void camara_task(void)
         judge_roundabout_dir(); /* 预判环岛方向 */
         zuohuan();
         patch_roundabout();
+				patch_crossroad();
 #endif
 				
         final_mid_line = find_mid_line_weight();
@@ -1625,9 +1639,10 @@ void camara_task(void)
         if(++skip >= CAMERA_DEBUG_DRAW_INTERVAL) {
             skip = 0;
 
-            make_binary_image();
+            
             ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
-            draw_line();
+						draw_line();
+            
 
             ips200_show_string(10, 160, "mid_value:");
             ips200_show_uint8(80,160,final_mid_line);
@@ -1729,6 +1744,7 @@ void camara_task(void)
 				
 				// 触发发送：打包图像 + 左/右/中三条线，一并推给上位机
 				seekfree_assistant_camera_send();
+				wifi_send_debug_text();
         // 【核心修改 4】：加上降频发送保护！
         // WiFi 带宽有限，如果每帧都发，会造成严重拥堵和控制延迟。
         // 这里复用 CAMERA_DEBUG_DRAW_INTERVAL (比如设置成8，即每8帧发一次)
@@ -1736,7 +1752,7 @@ void camara_task(void)
             skip = 0;
             
             
-						wifi_send_debug_text();
+						
            
         }
     }
