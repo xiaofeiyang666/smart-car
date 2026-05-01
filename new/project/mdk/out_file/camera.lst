@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 1   
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE camera
@@ -12,1440 +12,913 @@ stmt  level    source
 
     1          #include "camera.h"
     2          #include "zf_common_headfile.h"
-    3          #include <math.h>
-    4          
-    5          /* ===================== 全局变量 ===================== */
-    6          uint8 buff[2];
-    7          uint8 img_threshold;
-    8          uint8 left_jidian;
-    9          uint8 right_jidian;
+    3          
+    4          // ===================== 可调参数（视觉层） =====================
+    5          #define CAMERA_DEBUG_DRAW_ENABLE         0   // 0=关闭显示提帧率，1=开启显示便于调试
+    6          #define CAMERA_DEBUG_DRAW_INTERVAL       6
+    7          
+    8          // 性能档位：0=稳健，1=均衡，2=高帧率（推荐）
+    9          #define CAMERA_PERF_PROFILE              2
    10          
-   11          static uint8 bin_image[MT9V03X_H][MT9V03X_W];
-   12          
-   13          uint8 left_line_list[MT9V03X_H];
-   14          uint8 right_line_list[MT9V03X_H];
-   15          uint8 mid_line_list[MT9V03X_H];
-   16          uint8 left_line_raw[MT9V03X_H];
-   17          
-   18          #define CAM_H     30.0f
-   19          #define CAM_F     80.0f
-   20          #define VANISH_Y  10.0f
-   21          
-   22          /* ===================== 环岛/特征点专用变量 ===================== */
-   23          uint16 pt_down_x = 0, pt_down_y = 0;  /* A点(下拐点)坐标 */
-   24          uint16 pt_mid_x = 0,  pt_mid_y = 0;   /* B点(中拐点)坐标 - 预留 */
-   25          uint16 pt_up_x = 0,   pt_up_y = 0;    /* C点(上拐点)坐标 - 预留 */
-   26          uint16 exit_pt_x = 0;
-   27          uint16 exit_pt_y = 0;
-   28          uint8  island_dir = 0;                /* 0:无, 1:左环, 2:右环 */
-   29          uint8  roundabout_state = 0;          /* 环岛状态机步骤 */
-   30          uint16 delay_cnt = 0;                 /* 状态切换延时计数器 - 预留 */
-   31          
-   32          typedef enum {
-   33              R_NONE     = 0, // 直行或普通弯道
-   34              R_IN_PATCH = 1, // 发现 AB 点，开始入环补线
-   35              R_A_LOST   = 2  // A 点消失，依靠 BC 斜率补线
-   36          } RState_e;
-   37          
-   38          /* ===================== 八邻域专用变量 ===================== */
-   39          // 8个搜索方向: 0上, 1右上, 2右, 3右下, 4下, 5左下, 6左, 7左上
-   40          const int8 dir_x[8] = { 0,  1,  1,  1,  0, -1, -1, -1};
-   41          const int8 dir_y[8] = {-1, -1,  0,  1,  1,  1,  0, -1};
-   42          
-   43          // 存储八邻域爬行得到的点集（兼容北海玄风/乾勤算法）
-   44          uint16 left_pts_x[MT9V03X_H * 3];
-   45          uint16 left_pts_y[MT9V03X_H * 3];
-   46          uint8  left_pts_dir[MT9V03X_H * 3]; // 存储生长方向
-   47          uint16 left_pts_cnt = 0;
-   48          
-   49          uint16 right_pts_x[MT9V03X_H * 3];
-   50          uint16 right_pts_y[MT9V03X_H * 3];
-   51          uint8  right_pts_dir[MT9V03X_H * 3];
-   52          uint16 right_pts_cnt = 0;
-   53          
-   54          /* ===================== 极速二值化宏定义 ===================== */
-   55          #define GET_THRESH(y)    ( ((y) < MT9V03X_H/3) ? ((img_threshold > 235) ? 255 : (img_threshold + 20)) : i
-             -mg_threshold )
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 2   
+   11          #if (CAMERA_PERF_PROFILE == 0)
+               #define CAMERA_LOCAL_RANGE_MIN           14
+               #define CAMERA_LOCAL_RANGE_MAX           36
+               #define CAMERA_GLOBAL_RESCAN_NEAR_ROW    96
+               #define CAMERA_ROW_STEP                  2
+               #define CAMERA_MID_FILT_ALPHA_PCT        72
+               #define CAMERA_FINAL_MID_STEP_MIN        4
+               #define CAMERA_FINAL_MID_STEP_MAX        16
+               #define CAMERA_RESCAN_STREAK_TH          1
+               #define CAMERA_RESCAN_FORCE_NEAR_ROW     114
+               #define CAMERA_RESCAN_CONF_TH            50
+               #elif (CAMERA_PERF_PROFILE == 1)
+               #define CAMERA_LOCAL_RANGE_MIN           12
+               #define CAMERA_LOCAL_RANGE_MAX           32
+               #define CAMERA_GLOBAL_RESCAN_NEAR_ROW    106
+               #define CAMERA_ROW_STEP                  2
+               #define CAMERA_MID_FILT_ALPHA_PCT        70
+               #define CAMERA_FINAL_MID_STEP_MIN        5
+               #define CAMERA_FINAL_MID_STEP_MAX        17
+               #define CAMERA_RESCAN_STREAK_TH          2
+               #define CAMERA_RESCAN_FORCE_NEAR_ROW     116
+               #define CAMERA_RESCAN_CONF_TH            45
+               #else
+   34          #define CAMERA_LOCAL_RANGE_MIN           12  // 缩小局部搜索窗口
+   35          #define CAMERA_LOCAL_RANGE_MAX           28
+   36          #define CAMERA_GLOBAL_RESCAN_NEAR_ROW    112 // 全局补扫只保留最靠近车体的区域
+   37          #define CAMERA_ROW_STEP                  3   // 按3行处理，帧率提升最明显
+   38          #define CAMERA_MID_FILT_ALPHA_PCT        66
+   39          #define CAMERA_FINAL_MID_STEP_MIN        6
+   40          #define CAMERA_FINAL_MID_STEP_MAX        18
+   41          #define CAMERA_RESCAN_STREAK_TH          2   // 连续丢线才触发全局补扫
+   42          #define CAMERA_RESCAN_FORCE_NEAR_ROW     116 // 最近场仍强制补扫，防止贴边漏检
+   43          #define CAMERA_RESCAN_CONF_TH            45
+   44          #endif
+   45          
+   46          #define CAMERA_EDGE_GRAD_TH              24  // 灰度梯度阈值：越大越抗噪，越小越灵敏
+   47          #define CAMERA_EDGE_STEP_TH              10  // 邻域亮度跳变阈值：越大越保守
+   48          #define CAMERA_EDGE_SPAN_TH              20  // 局部对比度阈值：抑制低纹理区域误检
+   49          #define CAMERA_EDGE_BIAS_TH              6   // 亮暗偏置阈值：过滤伪边缘
+   50          #define CAMERA_TOP_THRESHOLD_GAIN        14  // 仅调试图传二值化使用
+   51          
+   52          #define CAMERA_WIDTH_MIN                 18
+   53          #define CAMERA_WIDTH_MAX                 (MT9V03X_W - 4)
+   54          #define CAMERA_EDGE_MIN_GAP              8
+   55          
+   56          #define CAMERA_GLOBAL_RESCAN_ENABLE      1   // 1=局部丢线后启用全行补扫
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 2   
 
-   56          
-   57          /* 1. 基础单点判断 (保留给八邻域爬虫使用，保证走线的连贯性和灵活性) */
-   58          #define IS_WHITE(y, x)   ( mt9v03x_image[y][x] >= GET_THRESH(y) )
-   59          #define IS_BLACK(y, x)   ( mt9v03x_image[y][x] <  GET_THRESH(y) )
+   57          
+   58          #define CAMERA_WIDTH_FILT_ALPHA_PCT      24
+   59          #define CAMERA_MID_SEED_BLEND_NUM        2   // mid_seed = (a*old + new)/(a+1)
    60          
-   61          /* 2. 【方案二新增】：宏定义级抗噪滤波 (0资源消耗) 
-   62             原理：要求当前点和旁边的点必须同时为同色，彻底无视单像素的白斑/黑点。 */
-   63          #define SAFE_MARGIN  2   // 先用2就够：只为 cover x±1；若别处还有 x±2 再调大
-   64          
-   65          #define IS_WHITE_STABLE(y, x) \
-   66              ( ((x) >= SAFE_MARGIN && (x) <= MT9V03X_W-1-SAFE_MARGIN) ? \
-   67                ( IS_WHITE((y), (x)) && IS_WHITE((y), (x)+1) ) : 0 )
-   68          
-   69          #define IS_BLACK_STABLE(y, x) \
-   70              ( ((x) >= SAFE_MARGIN && (x) <= MT9V03X_W-1-SAFE_MARGIN) ? \
-   71                ( IS_BLACK((y), (x)) && IS_BLACK((y), (x)-1) ) : 0 )
-   72          
-   73          
-   74          volatile uint16 current_fps = 0;
-   75          volatile uint16 fps_counter = 0;
-   76          static uint8 skip = 0;
-   77          
-   78          // ===================== 相机模块调整记录（中文注释） =====================
-   79          // 1) 既有改动：阈值防溢出、状态机修复、调试绘制开关、环岛逻辑开关
-   80          // 2) 本次配合控制改动：保持相机主流程轻量，优先保证转向实时性
-   81          
-   82          // 相机调试绘制开关：0=关闭屏幕绘制优先帧率，1=开启可视化调试
-   83          #define CAMERA_DEBUG_DRAW_ENABLE      0
-   84          #define CAMERA_DEBUG_DRAW_INTERVAL    8
-   85          // 赛道无环岛时建议关闭，可明显减少每帧计算量
-   86          #define ROUNDABOUT_LOGIC_ENABLE      0
-   87          
-   88          void mark_frame_processed(void) { fps_counter++; }
-   89          
-   90          void my_fps_timer_callback(void)
-   91          {
-   92   1          static uint16 time_ms = 0;
-   93   1          time_ms++;
-   94   1          if(time_ms >= 1000)
-   95   1          {
-   96   2              current_fps = fps_counter;
-   97   2              fps_counter = 0;
-   98   2              time_ms = 0;
-   99   2          }
+   61          #define CAMERA_NEAR_ROW                  (MT9V03X_H - 5)
+   62          
+   63          #define WIFI_SSID_TEST                   "Car"
+   64          #define WIFI_PASSWORD_TEST               "431431431"
+   65          #define WIFI_BOUNDARY_ENABLE             1
+   66          #define CAMERA_BINARY_OUTPUT_ENABLE      ((CAMERA_DEBUG_DRAW_ENABLE == 1) || (IPS200_OR_WIFI == 1))
+   67          
+   68          // ===================== 全局输出 =====================
+   69          uint8 img_threshold = 120;
+   70          uint8 left_jidian = 1;
+   71          uint8 right_jidian = MT9V03X_W - 2;
+   72          uint8 left_line_list[MT9V03X_H];
+   73          uint8 right_line_list[MT9V03X_H];
+   74          uint8 mid_line_list[MT9V03X_H];
+   75          uint8 final_mid_line = MID_W;
+   76          
+   77          int16 camera_bias_raw = 0;
+   78          int16 camera_preview_raw = 0;
+   79          uint8 camera_valid_line_cnt = 0;
+   80          uint8 camera_lost_left_cnt = 0;
+   81          uint8 camera_lost_right_cnt = 0;
+   82          uint8 camera_confidence = 0;
+   83          
+   84          // ===================== 模块内部变量 =====================
+   85          #if CAMERA_BINARY_OUTPUT_ENABLE
+               static uint8 bin_image[MT9V03X_H][MT9V03X_W];
+               #endif
+   88          static int final_mid_filtered_x8 = MID_W * 8;
+   89          static uint8 final_mid_init = 0;
+   90          
+   91          volatile uint16 current_fps = 0;
+   92          volatile uint16 fps_counter = 0;
+   93          #if CAMERA_DEBUG_DRAW_ENABLE
+               static uint8 skip_draw = 0;
+               #endif
+   96          
+   97          static int abs_i(int x)
+   98          {
+   99   1          return (x >= 0) ? x : -x;
   100   1      }
   101          
-  102          /* ===================== Ostu ===================== */
-  103          uint8 Ostu(void)
-  104          {
-  105   1          uint16 hist[256] = {0};
-  106   1          uint32 total, sum = 0, sumB = 0, wB = 0, wF = 0;
-  107   1          float mB, mF, diff, between, maxBetween = -1.0f;
-  108   1          uint8 threshold = 0;
-  109   1          uint16 i, x, y;
-  110   1      
-  111   1          for(y = 0; y < MT9V03X_H; y += 2) {
-  112   2              for(x = 0; x < MT9V03X_W; x += 2) {
-  113   3                  hist[mt9v03x_image[y][x]]++;
-  114   3              }
-  115   2          }
-  116   1          total = (MT9V03X_H / 2) * (MT9V03X_W / 2);
+  102          static int clamp_i(int x, int min_v, int max_v)
+  103          {
+  104   1          if (x < min_v) return min_v;
+  105   1          if (x > max_v) return max_v;
+  106   1          return x;
+  107   1      }
+  108          
+  109          static uint8 is_left_transition(int row, int x)
+  110          {
+  111   1          int g0, g1, g2, g3, g4;
+  112   1          int local_min;
+  113   1          int local_max;
+  114   1          int grad;
+  115   1          int step;
+  116   1          int grad_th;
   117   1      
-  118   1          for(i = 0; i < 256; i++) sum += (uint32)i * hist[i];
+  118   1          if (x < 2 || x > MT9V03X_W - 3) return 0;
   119   1      
-  120   1          for(i = 0; i < 256; i++) {
-  121   2              wB += hist[i];
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 3   
+  120   1          g0 = (int)mt9v03x_image[row][x - 2];
+  121   1          g1 = (int)mt9v03x_image[row][x - 1];
+  122   1          g2 = (int)mt9v03x_image[row][x];
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 3   
 
-  122   2              if(wB == 0) continue;
-  123   2              wF = total - wB;
-  124   2              if(wF == 0) break;
-  125   2      
-  126   2              sumB += (uint32)i * hist[i];
-  127   2              mB = (float)sumB / wB;
-  128   2              mF = (float)(sum - sumB) / wF;
-  129   2      
-  130   2              diff = mB - mF;
-  131   2              between = (float)wB * (float)wF * diff * diff;
-  132   2      
-  133   2              if(between > maxBetween) {
-  134   3                  maxBetween = between;
-  135   3                  threshold = (uint8)i;
-  136   3              }
-  137   2          }
-  138   1          return threshold;
-  139   1      }
-  140          
-  141          static void make_binary_image(void)
-  142          {
-  143   1          uint16 y, x;
-  144   1          for (y = 0; y < MT9V03X_H; y++) {
-  145   2              for (x = 0; x < MT9V03X_W; x++) {
-  146   3                  bin_image[y][x] = IS_WHITE(y, x) ? 255 : 0;
-  147   3              }
-  148   2          }
-  149   1      }
-  150          
-  151          static uint8 u16_to_str(char *out, uint16 v)
-  152          {
-  153   1          char tmp[6]; uint8 i = 0, len = 0;
-  154   1          if(v == 0) { out[0] = '0'; return 1; }
-  155   1          while(v && i < 5) { tmp[i++] = (char)('0' + (v % 10)); v /= 10; }
-  156   1          while(i) { out[len++] = tmp[--i]; }
-  157   1          return len;
-  158   1      }
-  159          
-  160          uint8 Limit_uint8(int a, int b, int c)
-  161          {
-  162   1          if((b>=a) && (b<=c)) return (uint8)b;
-  163   1          else if(b<a) return (uint8)a;
-  164   1          else if(b>c) return (uint8)c;
-  165   1          return 0;
-  166   1      }
-  167          
-  168          /* ===================== 找基点 ===================== */
-  169          void find_jidian(void)
-  170          {
-  171   1          uint8 j;
-  172   1          uint16 y = jidian_search_line - 1;
+  123   1          g3 = (int)mt9v03x_image[row][x + 1];
+  124   1          g4 = (int)mt9v03x_image[row][x + 2];
+  125   1      
+  126   1          local_min = g0;
+  127   1          if (g1 < local_min) local_min = g1;
+  128   1          if (g2 < local_min) local_min = g2;
+  129   1          if (g3 < local_min) local_min = g3;
+  130   1          if (g4 < local_min) local_min = g4;
+  131   1      
+  132   1          local_max = g0;
+  133   1          if (g1 > local_max) local_max = g1;
+  134   1          if (g2 > local_max) local_max = g2;
+  135   1          if (g3 > local_max) local_max = g3;
+  136   1          if (g4 > local_max) local_max = g4;
+  137   1      
+  138   1          if ((local_max - local_min) < CAMERA_EDGE_SPAN_TH) return 0;
+  139   1      
+  140   1          grad_th = CAMERA_EDGE_GRAD_TH;
+  141   1          if (row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) grad_th -= 2;
+  142   1          if (row <= 32) grad_th += 2;
+  143   1          if (grad_th < 12) grad_th = 12;
+  144   1      
+  145   1          grad = (g2 + g3) - (g0 + g1);
+  146   1          step = g2 - g1;
+  147   1      
+  148   1          if ((grad >= grad_th) &&
+  149   1              (step >= CAMERA_EDGE_STEP_TH) &&
+  150   1              ((g2 - local_min) >= CAMERA_EDGE_BIAS_TH))
+  151   1          {
+  152   2              return 1;
+  153   2          }
+  154   1          return 0;
+  155   1      }
+  156          
+  157          static uint8 is_right_transition(int row, int x)
+  158          {
+  159   1          int g0, g1, g2, g3, g4;
+  160   1          int local_min;
+  161   1          int local_max;
+  162   1          int grad;
+  163   1          int step;
+  164   1          int grad_th;
+  165   1      
+  166   1          if (x < 2 || x > MT9V03X_W - 3) return 0;
+  167   1      
+  168   1          g0 = (int)mt9v03x_image[row][x - 2];
+  169   1          g1 = (int)mt9v03x_image[row][x - 1];
+  170   1          g2 = (int)mt9v03x_image[row][x];
+  171   1          g3 = (int)mt9v03x_image[row][x + 1];
+  172   1          g4 = (int)mt9v03x_image[row][x + 2];
   173   1      
-  174   1          left_jidian = 1;
-  175   1          right_jidian = MT9V03X_W - 2;
-  176   1      
-  177   1          if(IS_WHITE(y, MT9V03X_W/2) && IS_WHITE(y, MT9V03X_W/2 + 1) && IS_WHITE(y, MT9V03X_W/2 - 1))
-  178   1          {
-  179   2              for(j=MT9V03X_W/2;j>0;j--) {
-  180   3                  if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
-  181   3                  if(j-1==1) { left_jidian=1; break; }
-  182   3              }
-  183   2              for(j=MT9V03X_W/2;j<MT9V03X_W-2;j++) {
-  184   3                  if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
-  185   3                  if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
-  186   3              }
-  187   2          }
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 4   
+  174   1          local_min = g0;
+  175   1          if (g1 < local_min) local_min = g1;
+  176   1          if (g2 < local_min) local_min = g2;
+  177   1          if (g3 < local_min) local_min = g3;
+  178   1          if (g4 < local_min) local_min = g4;
+  179   1      
+  180   1          local_max = g0;
+  181   1          if (g1 > local_max) local_max = g1;
+  182   1          if (g2 > local_max) local_max = g2;
+  183   1          if (g3 > local_max) local_max = g3;
+  184   1          if (g4 > local_max) local_max = g4;
+  185   1      
+  186   1          if ((local_max - local_min) < CAMERA_EDGE_SPAN_TH) return 0;
+  187   1      
+  188   1          grad_th = CAMERA_EDGE_GRAD_TH;
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 4   
 
-  188   1          else if(IS_WHITE(y, MT9V03X_W/4) && IS_WHITE(y, MT9V03X_W/4 + 1) && IS_WHITE(y, MT9V03X_W/4 - 1))
-  189   1          {
-  190   2              for(j=MT9V03X_W/4;j>0;j--) {
-  191   3                  if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
-  192   3                  if(j-1==1) { left_jidian=1; break; }
-  193   3              }
-  194   2              for(j=MT9V03X_W/4;j<MT9V03X_W-2;j++) {
-  195   3                  if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
-  196   3                  if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
-  197   3              }
-  198   2          }
-  199   1          else if(IS_WHITE(y, MT9V03X_W/4*3) && IS_WHITE(y, MT9V03X_W/4*3 + 1) && IS_WHITE(y, MT9V03X_W/4*3 - 1
-             -))
-  200   1          {
-  201   2              for(j=MT9V03X_W/4*3;j>0;j--) {
-  202   3                  if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
-  203   3                  if(j-1==1) { left_jidian=1; break; }
-  204   3              }
-  205   2              for(j=MT9V03X_W/4*3;j<MT9V03X_W-2;j++) {
-  206   3                  if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
-  207   3                  if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
-  208   3              }
-  209   2          }
-  210   1      }
-  211          
-  212          /* =======================================================================
-  213           * 八邻域边界跟踪算法 (8-Neighborhood Edge Tracking) - 防竖线修复版
-  214           * ======================================================================= */
-  215          void image_deal(void)
-  216          {
-  217   1          /* --- 1. 变量声明 (C89标准) --- */
-  218   1          int i;
-  219   1          int start_left_x, start_right_x, start_y;
-  220   1          int curr_x, curr_y, curr_dir;
-  221   1          int search_dir, found, start_search;
-  222   1          int nx, ny;
-  223   1      
-  224   1          /* --- 2. 初始化数组 --- */
-  225   1          for (i = 0; i < MT9V03X_H; i++) {
-  226   2              left_line_list[i] = 255;
-  227   2              right_line_list[i] = 255;
-  228   2              mid_line_list[i] = MID_W;
-  229   2          }
-  230   1          left_pts_cnt = 0;
-  231   1          right_pts_cnt = 0;
-  232   1      
-  233   1          /* --- 3. 获取起点 --- */
-  234   1          start_left_x = left_jidian;
-  235   1          start_right_x = right_jidian;
-  236   1          start_y = jidian_search_line - 1;
-  237   1          
-  238   1          if (start_left_x < 1) start_left_x = 1;
-  239   1          if (start_right_x > MT9V03X_W - 2) start_right_x = MT9V03X_W - 2;
-  240   1      
-  241   1          /* ---------------- 左边缘八邻域爬行 ---------------- */
-  242   1          curr_x = start_left_x;
-  243   1          curr_y = start_y;
-  244   1          curr_dir = 0; /* 初始方向：向上 */
-  245   1      
-  246   1          while (left_pts_cnt < MT9V03X_H * 3) {
-  247   2              /* 记录点集供高级算法使用 */
-  248   2              left_pts_x[left_pts_cnt] = curr_x;
-  249   2              left_pts_y[left_pts_cnt] = curr_y;
-  250   2              left_pts_dir[left_pts_cnt] = curr_dir;
-  251   2              left_pts_cnt++;
-  252   2      
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 5   
+  189   1          if (row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) grad_th -= 2;
+  190   1          if (row <= 32) grad_th += 2;
+  191   1          if (grad_th < 12) grad_th = 12;
+  192   1      
+  193   1          grad = (g0 + g1) - (g2 + g3);
+  194   1          step = g1 - g2;
+  195   1      
+  196   1          if ((grad >= grad_th) &&
+  197   1              (step >= CAMERA_EDGE_STEP_TH) &&
+  198   1              ((local_max - g2) >= CAMERA_EDGE_BIAS_TH))
+  199   1          {
+  200   2              return 1;
+  201   2          }
+  202   1          return 0;
+  203   1      }
+  204          
+  205          void mark_frame_processed(void)
+  206          {
+  207   1          fps_counter++;
+  208   1      }
+  209          
+  210          void my_fps_timer_callback(void)
+  211          {
+  212   1          static uint16 time_ms = 0;
+  213   1          time_ms++;
+  214   1          if (time_ms >= 1000)
+  215   1          {
+  216   2              current_fps = fps_counter;
+  217   2              fps_counter = 0;
+  218   2              time_ms = 0;
+  219   2          }
+  220   1      }
+  221          
+  222          // 灰度快照+二值快照：仅用于调试显示/图传，不参与主寻线
+  223          #if CAMERA_BINARY_OUTPUT_ENABLE
+               static void make_binary_snapshot(void)
+               {
+                   uint16 y, x;
+                   uint8 th_top;
+                   uint8 th_bot;
+                   uint16 top_end;
+                   uint8 th;
+                   uint8 g;
+               
+                   th_bot = img_threshold;
+                   th_top = (img_threshold > (255 - CAMERA_TOP_THRESHOLD_GAIN)) ? 255 : (img_threshold + CAMERA_TOP_THRE
+             -SHOLD_GAIN);
+                   top_end = MT9V03X_H / 3;
+               
+                   for (y = 0; y < MT9V03X_H; y++)
+                   {
+                       th = (y < top_end) ? th_top : th_bot;
+                       for (x = 0; x < MT9V03X_W; x++)
+                       {
+                           g = mt9v03x_image[y][x];
+                           bin_image[y][x] = (g >= th) ? 255 : 0;
+                       }
+                   }
+               
+               }
+               #endif
+  249          
+  250          // 根据行号估计赛道半宽（近处更宽，远处更窄）
+  251          static int estimate_half_width(int row)
+  252          {
+  253   1          int num;
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 5   
 
-  253   2              /* 映射到一维数组 */
-  254   2              if (curr_y >= 0 && curr_y < MT9V03X_H) {
-  255   3                  if (left_line_list[curr_y] == 255) {
-  256   4                      left_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
-  257   4                  }
-  258   3              }
-  259   2      
-  260   2              /* 只有到达图像顶端才结束爬行 */
-  261   2              if (curr_y <= search_end_line) break;
-  262   2      
-  263   2              /* 寻找下一个边缘点 (向左转90度开始，扫6个方向防止倒退) */
-  264   2              found = 0;
-  265   2              start_search = (curr_dir + 6) % 8; 
-  266   2              
-  267   2              for (i = 0; i < 6; i++) {
-  268   3                  search_dir = (start_search + i) % 8; /* 顺时针扫 */
-  269   3                  nx = curr_x + dir_x[search_dir];
-  270   3                  ny = curr_y + dir_y[search_dir];
-  271   3      
-  272   3                  /* 允许贴着屏幕边缘走，不触发 break */
-  273   3                  if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
-  274   4                      if (IS_WHITE(ny, nx)) {
-  275   5                          curr_x = nx;
-  276   5                          curr_y = ny;
-  277   5                          curr_dir = search_dir;
-  278   5                          found = 1;
-  279   5                          break;
-  280   5                      }
-  281   4                  }
-  282   3              }
-  283   2              
-  284   2              /* 【防呆机制】如果进入纯黑死胡同，强制向上走一步，防止死循环 */
-  285   2              if (!found) {
-  286   3                  curr_y--;
-  287   3                  curr_dir = 0;
-  288   3              }
-  289   2          }
-  290   1      
-  291   1          /* ---------------- 右边缘八邻域爬行 ---------------- */
-  292   1          curr_x = start_right_x;
-  293   1          curr_y = start_y;
-  294   1          curr_dir = 0; /* 初始方向：向上 */
-  295   1      
-  296   1          while (right_pts_cnt < MT9V03X_H * 3) {
-  297   2              right_pts_x[right_pts_cnt] = curr_x;
-  298   2              right_pts_y[right_pts_cnt] = curr_y;
-  299   2              right_pts_dir[right_pts_cnt] = curr_dir;
-  300   2              right_pts_cnt++;
-  301   2      
-  302   2              if (curr_y >= 0 && curr_y < MT9V03X_H) {
-  303   3                  if (right_line_list[curr_y] == 255) {
-  304   4                      right_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
-  305   4                  }
-  306   3              }
-  307   2      
-  308   2              if (curr_y <= search_end_line) break;
-  309   2      
-  310   2              found = 0;
-  311   2              start_search = (curr_dir + 2) % 8; /* 向右转90度开始 */
-  312   2              
-  313   2              for (i = 0; i < 6; i++) {
-  314   3                  search_dir = (start_search + 8 - i) % 8; /* 逆时针扫 */
-  315   3                  nx = curr_x + dir_x[search_dir];
-  316   3                  ny = curr_y + dir_y[search_dir];
-  317   3      
-  318   3                  if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 6   
+  254   1          int den;
+  255   1          int val;
+  256   1      
+  257   1          den = (search_start_line - search_end_line);
+  258   1          if (den <= 0) den = 1;
+  259   1      
+  260   1          num = (row - search_end_line);
+  261   1          if (num < 0) num = 0;
+  262   1          if (num > den) num = den;
+  263   1      
+  264   1          // 远处约44，近处约78
+  265   1          val = 44 + (34 * num) / den;
+  266   1          val = clamp_i(val, 42, 80);
+  267   1          return val;
+  268   1      }
+  269          
+  270          // 局部窗口找左边缘：优先贴近ref_x，减小跳变
+  271          static int find_left_edge_local(int row, int ref_x, int range)
+  272          {
+  273   1          int x;
+  274   1          int start_x;
+  275   1          int end_x;
+  276   1          int best_x;
+  277   1          int best_dist;
+  278   1          int dist;
+  279   1      
+  280   1          start_x = clamp_i(ref_x - range, 2, MT9V03X_W - 3);
+  281   1          end_x = clamp_i(ref_x + range, 2, MT9V03X_W - 3);
+  282   1      
+  283   1          best_x = -1;
+  284   1          best_dist = 10000;
+  285   1      
+  286   1          for (x = start_x; x <= end_x; x++)
+  287   1          {
+  288   2              if (is_left_transition(row, x))
+  289   2              {
+  290   3                  dist = abs_i(x - ref_x);
+  291   3                  if (dist < best_dist)
+  292   3                  {
+  293   4                      best_dist = dist;
+  294   4                      best_x = x;
+  295   4                  }
+  296   3              }
+  297   2          }
+  298   1      
+  299   1          return best_x;
+  300   1      }
+  301          
+  302          // 局部窗口找右边缘：优先贴近ref_x，减小跳变
+  303          static int find_right_edge_local(int row, int ref_x, int range)
+  304          {
+  305   1          int x;
+  306   1          int start_x;
+  307   1          int end_x;
+  308   1          int best_x;
+  309   1          int best_dist;
+  310   1          int dist;
+  311   1      
+  312   1          start_x = clamp_i(ref_x - range, 2, MT9V03X_W - 3);
+  313   1          end_x = clamp_i(ref_x + range, 2, MT9V03X_W - 3);
+  314   1      
+  315   1          best_x = -1;
+  316   1          best_dist = 10000;
+  317   1      
+  318   1          for (x = start_x; x <= end_x; x++)
+  319   1          {
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 6   
 
-  319   4                      if (IS_WHITE(ny, nx)) {
-  320   5                          curr_x = nx;
-  321   5                          curr_y = ny;
-  322   5                          curr_dir = search_dir;
-  323   5                          found = 1;
-  324   5                          break;
-  325   5                      }
-  326   4                  }
-  327   3              }
-  328   2              
-  329   2              if (!found) {
-  330   3                  curr_y--;
-  331   3                  curr_dir = 0;
-  332   3              }
-  333   2          }
-  334   1      
-  335   1            /* ---------------- 赛道空缺填补与中线计算 ---------------- */
-  336   1            for (i = search_start_line - 1; i > search_end_line; i--) {
-  337   2                
-  338   2                /* 1. 处理完全没扫到线的空白点 (255) */
-  339   2                if (left_line_list[i] == 255) {
-  340   3                    left_line_list[i] = (i < search_start_line - 1) ? left_line_list[i + 1] : 1;
-  341   3                }
-  342   2                if (right_line_list[i] == 255) {
-  343   3                    right_line_list[i] = (i < search_start_line - 1) ? right_line_list[i + 1] : MT9V03X_W - 2;
-  344   3                }
-  345   2                
-  346   2                left_line_raw[i] = left_line_list[i];
-  347   2      
-  348   2                /* ==========================================
-  349   2                 * ??? 【核心修复】：单边丢线补偿逻辑 (防贴边画龙)
-  350   2                 * ========================================== */
-  351   2                {
-  352   3                    // 设定赛道半宽（由于透视，近处赛道宽，远处窄。这里给个经验固定值 70）
-  353   3                    // 如果你的车偏内弯严重，可以把 70 调大；如果偏外弯严重，可以调小。
-  354   3                    int half_track = 70; 
-  355   3      
-  356   3                    // 情况 A：左边丢线 (贴紧左边缘 <= 2)，但右边有效！
-  357   3                    if (left_line_list[i] <= 2 && right_line_list[i] < MT9V03X_W - 5) {
-  358   4                        // 放弃左边线，用右边线向左平移一个半宽，得到完美中线！
-  359   4                        mid_line_list[i] = Limit_uint8(1, right_line_list[i] - half_track, MT9V03X_W - 2);
-  360   4                        
-  361   4                        // (可选) 顺便伪造一根左边线，让图传画面看起来完美连续
-  362   4                        left_line_list[i] = Limit_uint8(1, right_line_list[i] - half_track * 2, MT9V03X_W - 2);
-  363   4                    }
-  364   3                    
-  365   3                    // 情况 B：右边丢线 (贴紧右边缘 >= MT9V03X_W - 3)，但左边有效！
-  366   3                    else if (right_line_list[i] >= MT9V03X_W - 3 && left_line_list[i] > 2) {
-  367   4                        // 放弃右边线，用左边线向右平移一个半宽，得到完美中线！
-  368   4                        mid_line_list[i] = Limit_uint8(1, left_line_list[i] + half_track, MT9V03X_W - 2);
-  369   4                        
-  370   4                        // (可选) 伪造右边线
-  371   4                        right_line_list[i] = Limit_uint8(1, left_line_list[i] + half_track * 2, MT9V03X_W - 2);
-  372   4                    }
-  373   3                    
-  374   3                    // 情况 C：双边都有效，或者是直道，那就老老实实取平均值
-  375   3                    else {
-  376   4                        mid_line_list[i] = Limit_uint8(1, (left_line_list[i] + right_line_list[i]) / 2, MT9V03X_W - 2);
-  377   4                    }
-  378   3                }
-  379   2            }
+  320   2              if (is_right_transition(row, x))
+  321   2              {
+  322   3                  dist = abs_i(x - ref_x);
+  323   3                  if (dist < best_dist)
+  324   3                  {
+  325   4                      best_dist = dist;
+  326   4                      best_x = x;
+  327   4                  }
+  328   3              }
+  329   2          }
+  330   1      
+  331   1          return best_x;
+  332   1      }
+  333          
+  334          // 全行补扫左边缘：用于大角度弯道局部搜索失败兜底
+  335          static int find_left_edge_global(int row)
+  336          {
+  337   1          int x;
+  338   1          for (x = 2; x <= MT9V03X_W - 3; x++)
+  339   1          {
+  340   2              if (is_left_transition(row, x))
+  341   2              {
+  342   3                  return x;
+  343   3              }
+  344   2          }
+  345   1          return -1;
+  346   1      }
+  347          
+  348          // 全行补扫右边缘：用于大角度弯道局部搜索失败兜底
+  349          static int find_right_edge_global(int row)
+  350          {
+  351   1          int x;
+  352   1          for (x = MT9V03X_W - 3; x >= 2; x--)
+  353   1          {
+  354   2              if (is_right_transition(row, x))
+  355   2              {
+  356   3                  return x;
+  357   3              }
+  358   2          }
+  359   1          return -1;
+  360   1      }
+  361          
+  362          // 整行搜索基点，保证大弯贴边时也能起步
+  363          void find_jidian(void)
+  364          {
+  365   1          int y;
+  366   1          int left_x;
+  367   1          int right_x;
+  368   1      
+  369   1          y = jidian_search_line - 1;
+  370   1          y = clamp_i(y, search_end_line + 1, MT9V03X_H - 1);
+  371   1      
+  372   1          left_x = find_left_edge_global(y);
+  373   1          right_x = find_right_edge_global(y);
+  374   1      
+  375   1          if (left_x < 0) left_x = 1;
+  376   1          if (right_x < 0) right_x = MT9V03X_W - 2;
+  377   1      
+  378   1          left_jidian = (uint8)left_x;
+  379   1          right_jidian = (uint8)right_x;
   380   1      }
   381          
-  382          
-  383          // ==========================================
-  384          // 环岛方向预判 (丢线统计 + 中线绝对领地防伪)
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 7   
+  382          // 主寻线：逐行提取左右边界，并在单边丢线时做宽度模型重建
+  383          void image_deal(void)
+  384          {
+  385   1          int row;
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 7   
 
-  385          // ==========================================
-  386          void judge_roundabout_dir(void)
-  387          {
-  388   1          int r;
-  389   1          uint16 left_lost_cnt = 0;
-  390   1          uint16 right_lost_cnt = 0;
-  391   1          
-  392   1          // 获取屏幕中线坐标 (假设宽度是188，中线就是94)
-  393   1          int half_w = MT9V03X_W / 2; 
-  394   1      
-  395   1          if (roundabout_state > 0) return;
-  396   1      
-  397   1          // 1. 扫描中上部区域，统计左右两侧的“丢线（贴边）”行数
-  398   1          for (r = 30; r < MT9V03X_H - 15; r++) {
-  399   2              if (left_line_list[r] <= 5) {
-  400   3                  left_lost_cnt++;
-  401   3              }
-  402   2              if (right_line_list[r] >= MT9V03X_W - 6) { 
-  403   3                  right_lost_cnt++;
-  404   3              }
-  405   2          }
-  406   1      
-  407   1          island_dir = 0; // 默认为无环岛
+  386   1          int left_now;
+  387   1          int right_now;
+  388   1          int left_prev;
+  389   1          int right_prev;
+  390   1          int mid_seed;
+  391   1          int left_found;
+  392   1          int right_found;
+  393   1          int width_meas;
+  394   1          int width_est;
+  395   1          int width_filtered;
+  396   1          int both_valid;
+  397   1          int total_rows;
+  398   1          int mid_now;
+  399   1          int default_half;
+  400   1          int local_range;
+  401   1          int left_rebuilt;
+  402   1          int right_rebuilt;
+  403   1          int fix_mid;
+  404   1          int fix_half;
+  405   1          int fill_row;
+  406   1          int miss_streak;
+  407   1          uint8 prev_low_conf;
   408   1      
-  409   1          /* ==========================================
-  410   1           * 【判断左环岛】
-  411   1           * 基础条件：左边大面积丢线，且比右边多。
-  412   1           * 防伪条件：取画面中上部(Y=50)作为参考。右边线必须坚守在右半区！
-  413   1           * ========================================== */
-  414   1          if (left_lost_cnt > 15 && left_lost_cnt > right_lost_cnt + 10) {
-  415   2              
-  416   2              // 【核心绝杀】：如果是在左急弯，右边线在 Y=50 处一定会越过中线跑到左边。
-  417   2              // 我们给一点容错 (+10)，只要它越过了屏幕中线附近，就识破它是弯道！
-  418   2              if (right_line_list[50] < half_w + 10) {
-  419   3                  island_dir = 0; // 越界了，这是个左转弯！
-  420   3              } 
-  421   2              else {
-  422   3                  island_dir = 1; // 右线坚守右半区，确认前方是左环岛！
-  423   3              }
-  424   2          }
-  425   1          
-  426   1          /* ==========================================
-  427   1           * 【判断右环岛】(同理，镜像处理)
-  428   1           * ========================================== */
-  429   1          else if (right_lost_cnt > 15 && right_lost_cnt > left_lost_cnt + 10) {
-  430   2              
-  431   2              // 如果是右急弯，左边线在 Y=50 处会越过中线跑到右边。
-  432   2              // 给一点容错 (-10)，只要左线跑到了右半区，识破为弯道。
-  433   2              if (left_line_list[50] > half_w - 10) {
-  434   3                  island_dir = 0; // 越界了，这是个右转弯！
-  435   3              } 
-  436   2              else {
-  437   3                  island_dir = 0; // 右环补线流程尚未实现，先不触发环岛状态机
-  438   3              }
-  439   2          }
-  440   1      }
-  441          
-  442          
-  443          void zuohuan(void)
-  444          {
-  445   1          /* --- 1. 變數聲明 --- */
-  446   1          int i, y, step, s, found;
-  447   1          int idx_A = -1, idx_B = -1;
-  448   1          int y_ref, x_ref, predict_x;
-  449   1          float k_slope;
-  450   1          int land_x = -1, land_y = -1;
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 8   
+  409   1          for (row = 0; row < MT9V03X_H; row++)
+  410   1          {
+  411   2              left_line_list[row] = 1;
+  412   2              right_line_list[row] = MT9V03X_W - 2;
+  413   2              mid_line_list[row] = MID_W;
+  414   2          }
+  415   1      
+  416   1          camera_valid_line_cnt = 0;
+  417   1          camera_lost_left_cnt = 0;
+  418   1          camera_lost_right_cnt = 0;
+  419   1          total_rows = 0;
+  420   1      
+  421   1          left_prev = (int)left_jidian;
+  422   1          right_prev = (int)right_jidian;
+  423   1      
+  424   1          if ((right_prev - left_prev) < CAMERA_EDGE_MIN_GAP)
+  425   1          {
+  426   2              left_prev = MID_W - 30;
+  427   2              right_prev = MID_W + 30;
+  428   2          }
+  429   1      
+  430   1          left_prev = clamp_i(left_prev, 1, MT9V03X_W - 8);
+  431   1          right_prev = clamp_i(right_prev, left_prev + CAMERA_EDGE_MIN_GAP, MT9V03X_W - 2);
+  432   1          width_filtered = right_prev - left_prev;
+  433   1          mid_seed = (left_prev + right_prev) / 2;
+  434   1          miss_streak = 0;
+  435   1          prev_low_conf = (camera_confidence <= CAMERA_RESCAN_CONF_TH) ? 1 : 0;
+  436   1      
+  437   1          for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
+  438   1          {
+  439   2              total_rows += CAMERA_ROW_STEP;
+  440   2              both_valid = 0;
+  441   2              left_rebuilt = 0;
+  442   2              right_rebuilt = 0;
+  443   2      
+  444   2              local_range = 18 + (search_start_line - row) / 5;
+  445   2              local_range = clamp_i(local_range, CAMERA_LOCAL_RANGE_MIN, CAMERA_LOCAL_RANGE_MAX);
+  446   2      
+  447   2              left_found = find_left_edge_local(row, left_prev, local_range);
+  448   2              right_found = find_right_edge_local(row, right_prev, local_range);
+  449   2      
+  450   2              // 局部都没找到时，用中线种子做一次扩大窗口搜索
+  451   2              if ((left_found < 0) && (right_found < 0))
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 8   
 
-  451   1          int curr_x, curr_y, curr_dir;
-  452   1          int max_x = 0, max_y = 0;
-  453   1          int isl_x[200], isl_y[200]; 
-  454   1          int isl_cnt = 0;
-  455   1          int trough_x, trough_y, peak_x, peak_y, keep_state6;
-  456   1      
-  457   1          /* 【關鍵新增】：記憶上一幀 B 點的座標 */
-  458   1          static int last_B_x = 0;
-  459   1          static int last_B_y = 60; // 默認給個中景高度
-  460   1      
-  461   1          /* 清空特徵點座標 */
-  462   1          pt_down_x = 0; pt_down_y = 0;
-  463   1          pt_mid_x  = 0; pt_mid_y  = 0;
-  464   1          pt_up_x   = 0; pt_up_y   = 0;
-  465   1      
-  466   1          if (left_pts_cnt < 20) return;
-  467   1          if (roundabout_state == R_NONE && island_dir != 1) {
-  468   2            return;
-  469   2          }
-  470   1          /* ==========================================            
-  471   1           * 步骤 1：寻找 A 点 (状态 2 时闭眼，不找了)
-  472   1           * ========================================== */
-  473   1          // 只有在 R_NONE (0) 和 R_IN_PATCH (1) 的状态下才允许找 A 点
-  474   1          if ((roundabout_state == R_NONE || roundabout_state == R_IN_PATCH) && island_dir== 1 ) {
-  475   2              for (i = 3; i < (int)left_pts_cnt - 5; i++) {
-  476   3                  
-  477   3                  /* 八邻域方向夹角特征判断 */
-  478   3                  if ((left_pts_dir[i-1] == 0 || left_pts_dir[i-1] == 1 || left_pts_dir[i-1] == 7) && 
-  479   3                      (left_pts_dir[i+1] == 6 || left_pts_dir[i+1] == 7 || left_pts_dir[i+1] == 5)) {
-  480   4                      
-  481   4                      /* 【绝对下半场锁】：Y 坐标必须大于屏幕高度的 2/3
-  482   4                         这就把 A 点严格限制在了画面最下方的 1/3 区域！
-  483   4                         任凭远处赛道怎么反光、怎么扭曲，只要它没走到车头底下，统统无视！ */
-  484   4                      if (left_pts_y[i] > (MT9V03X_H /3 ) && left_pts_x[i] > 5) {
-  485   5                          
-  486   5                          pt_down_x = left_pts_x[i]; 
-  487   5                          pt_down_y = left_pts_y[i]; 
-  488   5                          idx_A = i; 
-  489   5                          break; 
-  490   5                      }
-  491   4                  }
-  492   3              }
-  493   2          }
-  494   1      
-  495   1          /* ==========================================
-  496   1           * 步驟 2：登陸中心島 (宏定义滤波版，绝不降落在噪点上)
-  497   1           * ========================================== */
-  498   1          if (idx_A != -1 && roundabout_state == R_NONE) {
-  499   2              // 情況 A：A 點還在，靠 A 點射線登陸
-  500   2              if (pt_down_y < 0 || pt_down_y >= MT9V03X_H) {
-  501   3                  idx_A = -1; // 认为A无效
-  502   3              } else {
-  503   3                  y_ref = pt_down_y + 5;
-  504   3                  if (y_ref < 0) y_ref = 0;
-  505   3                  if (y_ref >= MT9V03X_H) y_ref = MT9V03X_H - 1;
-  506   3      
-  507   3                  x_ref = left_line_list[y_ref];
-  508   3                  if (x_ref <= 1 || x_ref >= MT9V03X_W - 2) {
-  509   4                      idx_A = -1; // 左线无效，避免斜率乱飞
-  510   4                  }
+  452   2              {
+  453   3                  left_found = find_left_edge_local(row, mid_seed, local_range + 10);
+  454   3                  right_found = find_right_edge_local(row, mid_seed, local_range + 10);
+  455   3              }
+  456   2      
+  457   2              if ((left_found < 0) || (right_found < 0))
+  458   2              {
+  459   3                  miss_streak++;
+  460   3              }
+  461   2              else
+  462   2              {
+  463   3                  miss_streak = 0;
+  464   3              }
+  465   2      
+  466   2      #if CAMERA_GLOBAL_RESCAN_ENABLE
+  467   2              if ((row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) &&
+  468   2                  ((miss_streak >= CAMERA_RESCAN_STREAK_TH) ||
+  469   2                   (row >= CAMERA_RESCAN_FORCE_NEAR_ROW) ||
+  470   2                   prev_low_conf))
+  471   2              {
+  472   3                  if (left_found < 0)
+  473   3                  {
+  474   4                      left_found = find_left_edge_global(row);
+  475   4                  }
+  476   3                  if (right_found < 0)
+  477   3                  {
+  478   4                      right_found = find_right_edge_global(row);
+  479   4                  }
+  480   3              }
+  481   2      #endif
+  482   2      
+  483   2              if ((left_found >= 0) && (right_found >= 0) && ((right_found - left_found) >= CAMERA_EDGE_MIN_GAP
+             -))
+  484   2              {
+  485   3                  left_now = left_found;
+  486   3                  right_now = right_found;
+  487   3                  both_valid = 1;
+  488   3              }
+  489   2              else if ((left_found >= 0) && (right_found < 0))
+  490   2              {
+  491   3                  width_est = width_filtered;
+  492   3                  left_now = left_found;
+  493   3                  right_now = left_found + width_est;
+  494   3                  right_rebuilt = 1;
+  495   3              }
+  496   2              else if ((right_found >= 0) && (left_found < 0))
+  497   2              {
+  498   3                  width_est = width_filtered;
+  499   3                  right_now = right_found;
+  500   3                  left_now = right_found - width_est;
+  501   3                  left_rebuilt = 1;
+  502   3              }
+  503   2              else
+  504   2              {
+  505   3                  default_half = estimate_half_width(row);
+  506   3                  mid_now = mid_seed;
+  507   3                  left_now = mid_now - default_half;
+  508   3                  right_now = mid_now + default_half;
+  509   3                  left_rebuilt = 1;
+  510   3                  right_rebuilt = 1;
   511   3              }
-  512   2              k_slope = (float)(pt_down_x - x_ref) / ((float)(pt_down_y - y_ref) + 0.001f); 
-  513   2              for (y = pt_down_y - 2; y > 10; y--) {
-  514   3                  predict_x = pt_down_x + (int)(k_slope * (float)(y - pt_down_y));
-  515   3                  if (predict_x < 3) predict_x = 3;
-  516   3                  if (predict_x > MT9V03X_W - 2) predict_x = MT9V03X_W - 2;
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 9   
+  512   2      
+  513   2              left_now = clamp_i(left_now, 1, MT9V03X_W - 3);
+  514   2              right_now = clamp_i(right_now, 2, MT9V03X_W - 2);
+  515   2      
+  516   2              if ((right_now - left_now) < CAMERA_EDGE_MIN_GAP)
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 9   
 
-  517   3                  
-  518   3                  /* 【修改点 1】：使用 STABLE 宏，要求必须是一块实心的黑色区域才登陆 */
-  519   3                  if (IS_BLACK_STABLE(y, predict_x) && IS_BLACK_STABLE(y, predict_x - 2)) {
-  520   4                      land_x = predict_x; land_y = y; break;
-  521   4                  }
-  522   3              }
-  523   2          } 
-  524   1          else if (roundabout_state >= R_IN_PATCH) {
-  525   2              
-  526   2              int scan_up   = last_B_y - 15;
-  527   2              int scan_down = last_B_y + 15;
-  528   2              if (scan_up < 5) scan_up = 5;
-  529   2              if (scan_down > MT9V03X_H - 5) scan_down = MT9V03X_H - 5;
-  530   2      
-  531   2              for (y = scan_down; y >= scan_up; y--) {
-  532   3                  int start_x = last_B_x + 30; 
-  533   3                  if (start_x > MT9V03X_W - 5) start_x = MT9V03X_W - 5;
-  534   3      
-  535   3                  for (predict_x = start_x; predict_x > 5; predict_x--) {
-  536   4                      
-  537   4                      /* 【修改点 2】：右边必须是坚实的白赛道，左边必须是坚实的黑岛屿。
-  538   4                         彻底免疫赛道里的一粒黑灰，或者岛屿边上的一粒白反光！ */
-  539   4                      if (IS_WHITE_STABLE(y, predict_x) && IS_BLACK_STABLE(y, predict_x - 1)) {
-  540   5                          land_x = predict_x - 1; 
-  541   5                          land_y = y;
-  542   5                          y = 0; break; 
-  543   5                      }
-  544   4                  }
-  545   3              }
-  546   2          }
-  547   1      
-  548   1          /* ==========================================
-  549   1           * 【重要防护】：每次进入前，确保状态被清空，防止拿上一帧的旧数据算 C 点
-  550   1           * ========================================== */
-  551   1          idx_B = -1; 
-  552   1          // isl_cnt = 0; // 假设你的 isl_cnt 在更外层已经清零了，这里不用动
-  553   1      
-  554   1          /* ==========================================
-  555   1           * 步骤 3：爬虫寻找 B (逻辑不动)
-  556   1           * ========================================== */
-  557   1          if (land_x != -1  && roundabout_state<3) {
-  558   2              curr_x = land_x; curr_y = land_y; curr_dir = 0;
-  559   2              for (step = 0; step < 150; step++) {
-  560   3                  if (curr_y <= 2 || isl_cnt >= 200) break; 
-  561   3                  isl_x[isl_cnt] = curr_x; isl_y[isl_cnt] = curr_y; isl_cnt++;
-  562   3      
-  563   3                  // 找到了 B 点，记录索引
-  564   3                  if (curr_y >= 30 && curr_y <= 90 && curr_x >= max_x && curr_x <= (MT9V03X_W / 2)) {
-  565   4                      max_x = curr_x; max_y = curr_y; idx_B = isl_cnt - 1;
-  566   4                  }
-  567   3                  
-  568   3                  found = 0;
-  569   3                  for (s = 0; s < 8; s++) {
-  570   4                      int search_dir = (curr_dir + 6 + s) % 8;
-  571   4                      int nx = curr_x + dir_x[search_dir], ny = curr_y + dir_y[search_dir];
-  572   4                      if (nx >= 1 && nx < MT9V03X_W-1 && ny >= 2 && ny < MT9V03X_H) {
-  573   5                          if (IS_WHITE(ny, nx)) {
-  574   6                              curr_x = nx; curr_y = ny; curr_dir = search_dir; found = 1; break;
-  575   6                          }
-  576   5                      }
-  577   4                  }
-  578   3                  if (!found) curr_y--;
-  579   3              }
-  580   2              
-  581   2              /* ==========================================
-  582   2               * 【终极约束】：B 点 Y 轴单向阀保护
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 10  
+  517   2              {
+  518   3                  fix_mid = (left_now + right_now) / 2;
+  519   3                  fix_half = estimate_half_width(row);
+  520   3                  left_now = clamp_i(fix_mid - fix_half, 1, MT9V03X_W - 3);
+  521   3                  right_now = clamp_i(fix_mid + fix_half, 2, MT9V03X_W - 2);
+  522   3                  if (left_found < 0) left_rebuilt = 1;
+  523   3                  if (right_found < 0) right_rebuilt = 1;
+  524   3              }
+  525   2      
+  526   2              width_meas = right_now - left_now;
+  527   2              if ((width_meas >= CAMERA_WIDTH_MIN) && (width_meas <= CAMERA_WIDTH_MAX))
+  528   2              {
+  529   3                  width_filtered = (int)(((long)width_filtered * (100 - CAMERA_WIDTH_FILT_ALPHA_PCT) + (long)wi
+             -dth_meas * CAMERA_WIDTH_FILT_ALPHA_PCT + 50) / 100);
+  530   3              }
+  531   2      
+  532   2              left_line_list[row] = (uint8)left_now;
+  533   2              right_line_list[row] = (uint8)right_now;
+  534   2              mid_now = (left_now + right_now) / 2;
+  535   2              mid_line_list[row] = (uint8)clamp_i(mid_now, 1, MT9V03X_W - 2);
+  536   2      
+  537   2              // 行步进时，把中间未处理行用当前结果填充，保持中线连续
+  538   2              if (CAMERA_ROW_STEP > 1)
+  539   2              {
+  540   3                  for (fill_row = row + 1; (fill_row < row + CAMERA_ROW_STEP) && (fill_row < search_start_line)
+             -; fill_row++)
+  541   3                  {
+  542   4                      if (fill_row > search_end_line)
+  543   4                      {
+  544   5                          left_line_list[fill_row] = left_line_list[row];
+  545   5                          right_line_list[fill_row] = right_line_list[row];
+  546   5                          mid_line_list[fill_row] = mid_line_list[row];
+  547   5                      }
+  548   4                  }
+  549   3              }
+  550   2      
+  551   2              if (both_valid)
+  552   2              {
+  553   3                  if (camera_valid_line_cnt <= (uint8)(255 - CAMERA_ROW_STEP))
+  554   3                  {
+  555   4                      camera_valid_line_cnt += CAMERA_ROW_STEP;
+  556   4                  }
+  557   3                  else
+  558   3                  {
+  559   4                      camera_valid_line_cnt = 255;
+  560   4                  }
+  561   3              }
+  562   2              if (left_rebuilt)
+  563   2              {
+  564   3                  if (camera_lost_left_cnt < 255) camera_lost_left_cnt++;
+  565   3              }
+  566   2              if (right_rebuilt)
+  567   2              {
+  568   3                  if (camera_lost_right_cnt < 255) camera_lost_right_cnt++;
+  569   3              }
+  570   2      
+  571   2              left_prev = left_now;
+  572   2              right_prev = right_now;
+  573   2      
+  574   2              mid_seed = (CAMERA_MID_SEED_BLEND_NUM * mid_seed + mid_now) / (CAMERA_MID_SEED_BLEND_NUM + 1);
+  575   2              mid_seed = clamp_i(mid_seed, 2, MT9V03X_W - 3);
+  576   2          }
+  577   1      
+  578   1          if (total_rows <= 0)
+  579   1          {
+  580   2              camera_confidence = 0;
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 10  
 
-  583   2               * ========================================== */
-  584   2              if (max_x > 10) { 
-  585   3                  
-  586   3                  /* 逻辑：如果已经确认进入环岛寻找阶段 (状态 1 或 2)，
-  587   3                     且当前找到的 B 点高度 (max_y) 比上一帧 (last_B_y) 变小了超过 5 个像素
-  588   3                     说明它诡异地往上跳了，违背了车向前开的物理规律！这是个假 B 点！*/
-  589   3                  if (roundabout_state >= R_IN_PATCH && max_y < last_B_y - 5) {
-  590   4                      
-  591   4                      /* ? 发现假点：直接忽略它！
-  592   4                         并且强行继承上一帧正确的 B 点坐标，让状态机在这一帧安全度过 */
-  593   4                      pt_mid_x = last_B_x;
-  594   4                      pt_mid_y = last_B_y;
-  595   4                  } 
-  596   3                  else {
-  597   4                      /* ? 正常情况：Y 坐标是变大趋势，或者是第一次找 B 点，允许接纳 */
-  598   4                      pt_mid_x = max_x; 
-  599   4                      pt_mid_y = max_y; 
-  600   4                      
-  601   4                      /* 【合法更新記憶】 */
-  602   4                      last_B_x = pt_mid_x;
-  603   4                      last_B_y = pt_mid_y;
-  604   4                  }
-  605   3              }
-  606   2          } // <--- 步骤 3 的大括号在这里结束！！！
-  607   1      
-  608   1      
-  609   1          /* ==========================================
-  610   1           * 步骤 4：寻找 C 点 (垂直探测 + 动态记忆跟踪)
-  611   1           * ========================================== */
-  612   1                  {
-  613   2                      /* 【新增】：记忆上一帧 C 点的坐标 */
-  614   2                      static int last_C_x = 0;
-  615   2                      static int last_C_y = 0;
-  616   2                      
-  617   2                      int y, x;
-  618   2                      int hit_y = -1;
-  619   2                      int hit_x = -1;
-  620   2                      int best_c_x = -1;
-  621   2                      int best_c_y = -1;
-  622   2                      int start_y;
-  623   2                      
-  624   2                      /* --------------------------------------------------
-  625   2                       * 模式 A：常规模式 (B 点存在，以 B 为锚点往上找)
-  626   2                       * -------------------------------------------------- */
-  627   2                      if (idx_B != -1 && isl_y[idx_B] > 20 && roundabout_state<4) {
-  628   3                          
-  629   3                          hit_x = isl_x[idx_B]; // 记录 B 点的横坐标作为垂直线
-  630   3      
-  631   3                          for (y = isl_y[idx_B] - 10; y > 10; y--) {
-  632   4                              if (IS_BLACK(y, hit_x)) {
-  633   5                                  hit_y = y; 
-  634   5                                  break;
-  635   5                              }
-  636   4                          }
-  637   3                      }
-  638   2                      /* --------------------------------------------------
-  639   2                       * 模式 B：盲区跟踪模式 (状态 3 不找 B 点了，以旧 C 点为锚点找新 C 点)
-  640   2                       * -------------------------------------------------- */
-  641   2                      else if (roundabout_state == 3 && last_C_x > 0) {
-  642   3                          
-  643   3                          /* 逻辑：车往前开，C 点在画面中会越来越往下(Y增大)。
-  644   3                             我们从旧 C 点往左平移 20 个像素，确保射线正对着黑岛底部。 */
-  645   3                          hit_x = last_C_x - 20;
-  646   3                          if (hit_x < 5) hit_x = 5;
-  647   3      
-  648   3                          /* 从旧 C 点稍微靠下的位置开始，垂直往上扫，寻找新的底边 */
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 11  
+  581   2          }
+  582   1          else
+  583   1          {
+  584   2              int conf;
+  585   2              conf = (int)camera_valid_line_cnt * 100 / total_rows;
+  586   2      
+  587   2              // 丢线越多，置信度越低
+  588   2              conf -= (int)camera_lost_left_cnt / 2;
+  589   2              conf -= (int)camera_lost_right_cnt / 2;
+  590   2              conf = clamp_i(conf, 0, 100);
+  591   2              camera_confidence = (uint8)conf;
+  592   2          }
+  593   1      }
+  594          
+  595          // 根据中线数组计算最终中线输出，并生成给control的视觉特征
+  596          uint8 find_mid_line_weight(void)
+  597          {
+  598   1          int row;
+  599   1          uint32 sum_mid = 0;
+  600   1          uint32 sum_w = 0;
+  601   1          int width_now;
+  602   1          int row_weight;
+  603   1          int near_y;
+  604   1          int far_y;
+  605   1          int mid_new;
+  606   1          int rough_preview;
+  607   1          int abs_preview;
+  608   1          int step_limit;
+  609   1          int32 delta_x8;
+  610   1          int32 target_mid_x8;
+  611   1          int preview_tmp;
+  612   1          uint8 final_mid_tmp;
+  613   1          int16 bias_tmp;
+  614   1          int16 preview_out;
+  615   1          uint8 ea_state;
+  616   1      
+  617   1          near_y = clamp_i(CAMERA_NEAR_ROW, search_end_line + 1, MT9V03X_H - 1);
+  618   1      
+  619   1          // 先用固定行做一版粗前瞻，再动态决定far_y
+  620   1          rough_preview = (int)mid_line_list[32] - (int)mid_line_list[near_y];
+  621   1          abs_preview = abs_i(rough_preview);
+  622   1      
+  623   1          if (abs_preview >= 12)
+  624   1          {
+  625   2              far_y = 38; // 急弯时略靠近，减少远处噪声误导
+  626   2          }
+  627   1          else if (abs_preview >= 6)
+  628   1          {
+  629   2              far_y = 34;
+  630   2          }
+  631   1          else
+  632   1          {
+  633   2              far_y = 28; // 直道/缓弯时看得更远，提前预判
+  634   2          }
+  635   1      
+  636   1          if (camera_confidence < 50)
+  637   1          {
+  638   2              far_y += 4; // 低置信度时回收前瞻距离，优先稳定
+  639   2          }
+  640   1      
+  641   1          far_y = clamp_i(far_y, search_end_line + 1, MT9V03X_H - 1);
+  642   1      
+  643   1          for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
+  644   1          {
+  645   2              if (row >= (MT9V03X_H - 10)) row_weight = 18;
+  646   2              else if (row >= (MT9V03X_H - 24)) row_weight = 14;
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 11  
 
-  649   3                          start_y = last_C_y + 20; 
-  650   3                          if (start_y >= MT9V03X_H) start_y = MT9V03X_H - 1;
-  651   3      
-  652   3                          for (y = start_y; y > 5; y--) {
-  653   4                              if (IS_BLACK(y, hit_x)) {
-  654   5                                  hit_y = y;
-  655   5                                  break;
-  656   5                              }
-  657   4                          }
-  658   3                      }
-  659   2      
-  660   2                      /* --------------------------------------------------
-  661   2                       * 共有特征提取：找到了黑边 hit_y，开始横向找角点
-  662   2                       * -------------------------------------------------- */
-  663   2                      if (hit_y != -1) {
-  664   3                          
-  665   3                          /* ?? 【核心高度锁】：限制 C 点高度 (Y) 必须小于 90
-  666   3                             如果撞墙的这一行已经处于画面最下方 (>= 90)，说明车头已经贴近了，
-  667   3                             这个角点极有可能是 A 点或车头噪点，直接放弃提取！ */
-  668   3                          if (hit_y < 90) {
-  669   4                              
-  670   4                              /* 在撞墙这一行(hit_y)，从 hit_x 开始向右扫描找尖角 */
-  671   4                              for (x = hit_x; x < MT9V03X_W - 5; x++) {
-  672   5                                  if (IS_BLACK(hit_y, x) && IS_WHITE(hit_y, x + 1)) {
-  673   6                                      best_c_x = x;
-  674   6                                      best_c_y = hit_y;
-  675   6                                      break;
-  676   6                                  }
-  677   5                              }
-  678   4                          }
-  679   3      
-  680   3                          /* 容错：尝试在稍高一点的一行找 */
-  681   3                          if (best_c_x == -1 && hit_y > 5) {
-  682   4                              
-  683   4                              /* 同样加上高度锁 */
-  684   4                              if ((hit_y - 2) < 90) {
-  685   5                                  for (x = hit_x; x < MT9V03X_W - 5; x++) {
-  686   6                                      if (IS_BLACK(hit_y - 2, x) && IS_WHITE(hit_y - 2, x + 1)) {
-  687   7                                          best_c_x = x;
-  688   7                                          best_c_y = hit_y - 2;
-  689   7                                          break;
-  690   7                                      }
-  691   6                                  }
-  692   5                              }
-  693   4                          }
-  694   3                      }
-  695   2      
-  696   2                      /* --------------------------------------------------
-  697   2                       * 最终输出与记忆更新
-  698   2                       * -------------------------------------------------- */
-  699   2                      if (best_c_x != -1) {
-  700   3                          pt_up_x = best_c_x;
-  701   3                          pt_up_y = best_c_y;
-  702   3                          
-  703   3                          /* 安全校验：向下移动 1 像素落入白区 */
-  704   3                          if ((pt_up_y + 1) < MT9V03X_H && IS_WHITE(pt_up_y + 1, pt_up_x)) {
-  705   4                              pt_up_y += 1;
-  706   4                          }
-  707   3      
-  708   3                          /* 【关键更新】：把成功找到的新 C 点存入记忆，供下一帧使用 */
-  709   3                          last_C_x = pt_up_x;
-  710   3                          last_C_y = pt_up_y;
-  711   3                      } else {
-  712   3                          /* ==========================================
-  713   3                           * ??? 【核心护甲】：C点惯性下沉防闪穿
-  714   3                           * ========================================== */
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 12  
+  647   2              else if (row >= 80) row_weight = 10;
+  648   2              else if (row >= 60) row_weight = 6;
+  649   2              else row_weight = 3;
+  650   2      
+  651   2              width_now = (int)right_line_list[row] - (int)left_line_list[row];
+  652   2              if ((width_now < CAMERA_WIDTH_MIN) || (width_now > CAMERA_WIDTH_MAX))
+  653   2              {
+  654   3                  row_weight = (row_weight * 5) / 10;
+  655   3              }
+  656   2      
+  657   2              if ((left_line_list[row] <= 2) || (right_line_list[row] >= MT9V03X_W - 3))
+  658   2              {
+  659   3                  row_weight = (row_weight * 7) / 10;
+  660   3              }
+  661   2      
+  662   2              sum_mid += (uint32)mid_line_list[row] * (uint32)row_weight;
+  663   2              sum_w += (uint32)row_weight;
+  664   2          }
+  665   1      
+  666   1          if (sum_w == 0)
+  667   1          {
+  668   2              mid_new = MID_W;
+  669   2          }
+  670   1          else
+  671   1          {
+  672   2              mid_new = (int)(sum_mid / sum_w);
+  673   2          }
+  674   1      
+  675   1          mid_new = clamp_i(mid_new, 1, MT9V03X_W - 2);
+  676   1      
+  677   1          if (!final_mid_init)
+  678   1          {
+  679   2              final_mid_filtered_x8 = mid_new * 8;
+  680   2              final_mid_init = 1;
+  681   2          }
+  682   1          else
+  683   1          {
+  684   2              step_limit = CAMERA_FINAL_MID_STEP_MIN + abs_preview / 2;
+  685   2              step_limit = clamp_i(step_limit, CAMERA_FINAL_MID_STEP_MIN, CAMERA_FINAL_MID_STEP_MAX);
+  686   2      
+  687   2              delta_x8 = (int32)mid_new * 8 - (int32)final_mid_filtered_x8;
+  688   2              if (delta_x8 > (int32)step_limit * 8) delta_x8 = (int32)step_limit * 8;
+  689   2              if (delta_x8 < -((int32)step_limit * 8)) delta_x8 = -((int32)step_limit * 8);
+  690   2      
+  691   2              target_mid_x8 = (int32)final_mid_filtered_x8 + delta_x8;
+  692   2              final_mid_filtered_x8 = (int)(((int32)final_mid_filtered_x8 * (100 - CAMERA_MID_FILT_ALPHA_PCT) +
+             - target_mid_x8 * CAMERA_MID_FILT_ALPHA_PCT + 50) / 100);
+  693   2          }
+  694   1      
+  695   1          final_mid_tmp = (uint8)clamp_i((final_mid_filtered_x8 + 4) / 8, 1, MT9V03X_W - 2);
+  696   1          bias_tmp = (int16)((int)final_mid_tmp - MID_W);
+  697   1          preview_tmp = (int)mid_line_list[far_y] - (int)mid_line_list[near_y];
+  698   1          preview_tmp = clamp_i(preview_tmp, -90, 90);
+  699   1          preview_out = (int16)preview_tmp;
+  700   1      
+  701   1          ea_state = EA;
+  702   1          EA = 0;
+  703   1          final_mid_line = final_mid_tmp;
+  704   1          camera_bias_raw = bias_tmp;
+  705   1          camera_preview_raw = preview_out;
+  706   1          EA = ea_state;
+  707   1      
+  708   1          return final_mid_tmp;
+  709   1      }
+  710          
+  711          #if CAMERA_DEBUG_DRAW_ENABLE
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 12  
 
-  715   3                          if (roundabout_state == 3) {
-  716   4                              // 如果之前看到过C点，现在丢了，给它加上惯性车速往下掉！
-  717   4                              if (last_C_y > 0) {
-  718   5                                  pt_up_x = last_C_x;
-  719   5                                  pt_up_y = last_C_y + 10; // 每帧强行下坠 10 像素
-  720   5                                  if (pt_up_y > MT9V03X_H - 1) pt_up_y = MT9V03X_H - 1; // 防溢出
-  721   5                              } 
-  722   4                              else {
-  723   5                                  // 强行在屏幕左上方伪造一个基准点，逼迫 60 度斜线画出来
-  724   5                                  pt_up_x = 20; 
-  725   5                                  pt_up_y = 10; 
-  726   5                              }
-  727   4                              
-  728   4                              // 更新记忆，让它下一帧继续往下掉
-  729   4                              last_C_x = pt_up_x;
-  730   4                              last_C_y = pt_up_y;
-  731   4                          } 
-  732   3                          else {
-  733   4                              /* 如果不是状态 3 彻底找不到了，就清零 */
-  734   4                              last_C_x = 0;
-  735   4                              last_C_y = 0;
-  736   4                          }
-  737   3                      }
-  738   2                  }
-  739   1      
-  740   1                  
-  741   1                  /* ==========================================
-  742   1           * 步骤 5：状态 4 & 5 专属 - 绿线曲率寻拐法 (出岛点)
-  743   1           * 目标：动态阈值 + 边缘防伪 + 暴力突变特权
-  744   1           * ========================================== */
-  745   1          exit_pt_x = 0;
-  746   1          exit_pt_y = 0;
+               static void draw_debug_overlay(void)
+               {
+                   int row;
+                   int px, py;
+               
+                   ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
+               
+                   for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
+                   {
+                       px = (left_line_list[row] * 9) >> 3;
+                       py = (row * 9) >> 3;
+                       ips200_draw_point(px, py, RGB565_BLUE);
+               
+                       px = (right_line_list[row] * 9) >> 3;
+                       ips200_draw_point(px, py, RGB565_GREEN);
+               
+                       px = (mid_line_list[row] * 9) >> 3;
+                       ips200_draw_point(px, py, RGB565_RED);
+                   }
+               
+                   ips200_show_string(10, 160, "mid:");
+                   ips200_show_uint8(60, 160, final_mid_line);
+                   ips200_show_string(10, 175, "fps:");
+                   ips200_show_uint16(60, 175, current_fps);
+                   ips200_show_string(10, 190, "conf:");
+                   ips200_show_uint8(60, 190, camera_confidence);
+               }
+               #endif
+  740          
+  741          #if (IPS200_OR_WIFI == 0)
+  742          
+  743          void camara_init(void)
+  744          {
+  745   1          ips200_init();
+  746   1          ips200_show_string(0, 0, "mt9v03x init.");
   747   1      
-  748   1          if (roundabout_state == 4 || roundabout_state == 5) {
-  749   2              int y;
-  750   2              int step = 4;           /* 【敏感升级】：步长改为 4，让远处的突变更明显 */
-  751   2              int min_x = MT9V03X_W;  
-  752   2              int max_dx = 0;         
-  753   2              int best_y = -1;
-  754   2              int dx;
-  755   2              int dynamic_threshold;
-  756   2      
-  757   2              /* 【范围扩大】：从屏幕最底下 H-5 开始，一路往上搜到距离顶部 15 行 */
-  758   2              for (y = MT9V03X_H - 5; y >= 15 + step; y--) {
-  759   3                  int curr_x = right_line_list[y];
-  760   3                  int up_x   = right_line_list[y - step]; 
-  761   3                  
-  762   3                  /* 【准确升级：边缘防伪】：
-  763   3                     如果当前点或上方的点贴在了屏幕最右侧(无效默认值)，
-  764   3                     说明绿线在这里断了或出界了，直接跳过，绝不能当拐点！ */
-  765   3                  if (curr_x >= MT9V03X_W - 5 || up_x >= MT9V03X_W - 5) {
-  766   4                      continue; 
-  767   4                  }
-  768   3      
-  769   3                  if (curr_x < min_x) {
-  770   4                      min_x = curr_x;
-  771   4                  }
-  772   3      
-  773   3                  dx = up_x - curr_x;
-  774   3      
-  775   3                  
-  776   3                  if (y < 40) {
-  777   4                      dynamic_threshold = 4;
-  778   4                  } else if (y < 75) {
-  779   4                      dynamic_threshold = 6;
-  780   4                  } else {
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 13  
+  748   1          while (1)
+  749   1          {
+  750   2              system_delay_ms(80);
+  751   2              if (mt9v03x_init())
+  752   2              {
+  753   3                  ips200_show_string(0, 16, "mt9v03x reinit.");
+  754   3              }
+  755   2              else
+  756   2              {
+  757   3                  break;
+  758   3              }
+  759   2          }
+  760   1      
+  761   1          ips200_show_string(0, 16, "init success.");
+  762   1      }
+  763          
+  764          void camara_task(void)
+  765          {
+  766   1          if (mt9v03x_finish_flag)
+  767   1          {
+  768   2              mt9v03x_finish_flag = 0;
+  769   2      
+  770   2              find_jidian();
+  771   2              image_deal();
+  772   2              (void)find_mid_line_weight();
+  773   2              mark_frame_processed();
+  774   2      
+  775   2      #if CAMERA_DEBUG_DRAW_ENABLE
+                       if (++skip_draw >= CAMERA_DEBUG_DRAW_INTERVAL)
+                       {
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 13  
 
-  781   4                      dynamic_threshold = 8;
-  782   4                  }
-  783   3      
-  784   3                  /* 如果超过了动态阈值，并且比之前记录的都大，则开始竞争 best_y */
-  785   3                  if (dx > dynamic_threshold && dx > max_dx) {
-  786   4                      
-  787   4                      /* 【敏感升级：放宽突出度束缚 + 暴力特权】
-  788   4                         条件A：位于突出点附近 (容错拉宽到 min_x + 12)
-  789   4                         条件B：如果 dx 突然大于 15 (极其暴力的撕裂)，无视突出条件直接认！ */
-  790   4                      if (curr_x <= min_x + 12 || dx > 15) {
-  791   5                          max_dx = dx;
-  792   5                          best_y = y;
-  793   5                      }
-  794   4                  }
-  795   3              }
-  796   2      
-  797   2              /* 【核心 Bug 修复】：去掉了 max_dx > 8 的死板校验！
-  798   2                 只要 best_y 被赋值了，说明它一定通过了上面的动态阈值筛选！ */
-  799   2              if (best_y != -1) {
-  800   3                  exit_pt_x = right_line_list[best_y];
-  801   3                  exit_pt_y = best_y;
-  802   3              }
-  803   2      
-  804   2              /* --------------------------------------------------
-  805   2               * 出岛切线预判
-  806   2               * -------------------------------------------------- */
-  807   2              if (exit_pt_x != 0) {
-  808   3                  /* 在状态 4 下看见点，立刻切入状态 5 准备拉线！ */
-  809   3                  if (roundabout_state == 4) {
-  810   4                      roundabout_state = 5; 
-  811   4                  }
-  812   3              }
-  813   2          }
-  814   1          
-  815   1          
-  816   1          
-  817   1          
-  818   1          /* ==========================================
-  819   1           * 状态切换逻辑
-  820   1           * ========================================== */
-  821   1          if (roundabout_state == R_NONE) {
-  822   2              if (pt_down_x > 0 && pt_mid_x > 0) roundabout_state = R_IN_PATCH; 
-  823   2          } 
-  824   1          else if (roundabout_state == R_IN_PATCH) {
-  825   2              if (pt_down_x == 0 && pt_mid_x > 0) roundabout_state = R_A_LOST;  
-  826   2              if (pt_mid_x == 0) roundabout_state = R_NONE; 
-  827   2          }
-  828   1          else if (roundabout_state == R_A_LOST) {
-  829   2              
-  830   2              /* 【核心修正】：用 B 点的 Y 坐标 (pt_mid_y) 判断距离！
-  831   2                 当 B 点下沉到画面中下方(>50)时，说明车已经贴近环岛入口，立刻切入！ */
-  832   2              if (pt_mid_y > 50 && pt_up_y > 0) {
-  833   3                  roundabout_state = 3; // 进入状态 3 (强制拉角入环)
-  834   3              }
-  835   2              /* 如果 B 点彻底丢了 (坐标为 0) */
-  836   2              else if (pt_mid_y == 0) {
-  837   3                  roundabout_state = R_NONE;
-  838   3                  last_B_y = 60; // 彻底丢失后重置预测高度
-  839   3              }
-  840   2          }
-  841   1          /* 状态 3 的退出逻辑 */
-  842   1          else if (roundabout_state == 3) {
-  843   2              // 进环后，C 点(上拐点)也会逐渐掉出屏幕下方而丢失
-  844   2              if ( pt_up_y >= MT9V03X_H - 10) {
-  845   3                  roundabout_state = 4; // 切入状态 4：环内巡航
-  846   3              }
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 14  
-
-  847   2          }
-  848   1          /* ==========================================
-  849   1           * 狀態 5 退出邏輯：出島點丟失 -> 進入狀態 6
-  850   1           * ========================================== */
-  851   1          else if (roundabout_state == 5) {
-  852   2              /* * 當 exit_pt_x 歸 0，說明車頭已經完全甩出環島，
-  853   2               * 那個右側的角點已經掉出了屏幕下方或被車身遮擋。
-  854   2               */
-  855   2              if (exit_pt_x == 0) {
-  856   3                  roundabout_state = 6; 
-  857   3                  
-  858   3              }
-  859   2          }
-  860   1          
-  861   1          /* ==========================================
-  862   1           * 状态机跳转：状态 6 (出岛恢复) -> 状态 0 (重生)
-  863   1           * 仅当左侧“波谷+上峰”特征彻底消失时退出，避免卡死
-  864   1           * ========================================== */
-  865   1          else if (roundabout_state == 6) {
-  866   2              keep_state6 = 0;
-  867   2              trough_x = 255;
-  868   2              trough_y = -1;
-  869   2              peak_x = 0;
-  870   2              peak_y = -1;
-  871   2      
-  872   2              for (y = MT9V03X_H - 15; y >= 20; y--) {
-  873   3                  curr_x = left_line_list[y];
-  874   3                  if (curr_x > 1 && curr_x < MT9V03X_W - 5) {
-  875   4                      if (curr_x < trough_x) {
-  876   5                          trough_x = curr_x;
-  877   5                          trough_y = y;
-  878   5                      }
-  879   4                  }
-  880   3              }
-  881   2      
-  882   2              if (trough_y != -1) {
-  883   3                  for (y = trough_y; y >= 15; y--) {
-  884   4                      curr_x = left_line_list[y];
-  885   4                      if (curr_x > peak_x && curr_x < MT9V03X_W - 5) {
-  886   5                          peak_x = curr_x;
-  887   5                          peak_y = y;
-  888   5                      }
-  889   4                  }
-  890   3      
-  891   3                  if (peak_y != -1 && (peak_x - trough_x >= 4)) {
-  892   4                      keep_state6 = 1;
-  893   4                  }
-  894   3              }
-  895   2      
-  896   2              if (!keep_state6) {
-  897   3                  roundabout_state = R_NONE;
-  898   3                  pt_down_x = 0; pt_down_y = 0;
-  899   3                  pt_mid_x  = 0; pt_mid_y  = 0;
-  900   3                  pt_up_x   = 0; pt_up_y   = 0;
-  901   3                  exit_pt_x = 0; exit_pt_y = 0;
-  902   3                  last_B_y = 60;
-  903   3                  island_dir = 0;
-  904   3              }
-  905   2          }
-  906   1      }
-  907          
-  908          void patch_roundabout(void)
-  909          {
-  910   1          int r, new_x;
-  911   1          float slope;
-  912   1        
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 15  
-
-  913   1          // --- 状态 1：正常的 A-B 补线 ---
-  914   1          if (roundabout_state == R_IN_PATCH) {
-  915   2              if (pt_down_x > 0 && pt_mid_x > 0 && pt_down_y != pt_mid_y) {
-  916   3                  slope = (float)((int)pt_down_x - (int)pt_mid_x) / (float)((int)pt_down_y - (int)pt_mid_y);
-  917   3                  for (r = pt_down_y; r >= (int)pt_mid_y; r--) {
-  918   4                      new_x = (int)pt_down_x - (int)(slope * (float)((int)pt_down_y - r));
-  919   4                      left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
-  920   4                      mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
-  921   4                  }
-  922   3              }
-  923   2          }
-  924   1      
-  925   1          // --- 状态 2：A 消失，从 B 点直接连到屏幕左下角 ---
-  926   1          else if (roundabout_state == R_A_LOST) {
-  927   2              if (pt_mid_x > 0 && pt_mid_y < MT9V03X_H - 1) { 
-  928   3                  slope = (float)(1 - (int)pt_mid_x) / (float)((MT9V03X_H - 1) - (int)pt_mid_y);
-  929   3                  for (r = pt_mid_y; r < MT9V03X_H; r++) {
-  930   4                      new_x = (int)pt_mid_x + (int)(slope * (float)(r - (int)pt_mid_y));
-  931   4                      left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
-  932   4                      mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
-  933   4                  }
-  934   3              }
-  935   2          }
-  936   1          
-  937   1          // --- 【修正】状态 3：快进环岛，从 C 点向右下角呈 60 度猛烈拉线 ---
-  938   1          else if (roundabout_state == 3 || roundabout_state == 2) {
-  939   2              /* 确保 C 点有效 */
-  940   2              if (pt_up_x > 0 && pt_up_y < MT9V03X_H - 1) { 
-  941   3                  
-  942   3                  /* 从 C 点位置向下，一路强行画到屏幕底部 */
-  943   3                  for (r = pt_up_y; r < MT9V03X_H; r++) {
-  944   4                      
-  945   4                      /* 计算 60 度角拉线的理论 X 坐标 */
-  946   4                      new_x = (int)pt_up_x + ((r - (int)pt_up_y) * 7) / 4;
-  947   4                      
-  948   4                      /* ==========================================
-  949   4                       * 【核心新增】：相交截断保护 (防底层干扰)
-  950   4                       * ========================================== */
-  951   4                      /* 如果我们算出来的拉线 X 坐标，已经撞上（大于等于）了原本存在的真实右边线，
-  952   4                         说明引导线已经完美切入了真实赛道边界！
-  953   4                         立刻 break 打断循环，保留下方所有真实有效的边线和中线数据！*/
-  954   4                      if (new_x >= right_line_list[r]) {
-  955   5                          break; 
-  956   5                      }
-  957   4                      
-  958   4                      /* Limit_uint8 保护，防止越界 */
-  959   4                      right_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
-  960   4                      
-  961   4                      /* 重新计算这一行的中线，引导舵机暴躁入环 */
-  962   4                      mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
-  963   4                  }
-  964   3              }
-  965   2          }
-  966   1          
-  967   1          // --- 【极简暴力版】状态 5：强行出岛，右线左上60度拉线，蓝线死锁屏幕左边缘 ---
-  968   1          else if (roundabout_state == 5) {
-  969   2              /* 确保出岛点有效 */
-  970   2              if (exit_pt_x > 0 && exit_pt_y > 0) { 
-  971   3                  
-  972   3                  for (r = exit_pt_y; r >= 0; r--) {
-  973   4                      
-  974   4                      /* ==========================================
-  975   4                       * 1. 绿线：60度角左上强拉 
-  976   4                       * ========================================== */
-  977   4                      new_x = (int)exit_pt_x - (((int)exit_pt_y - r) * 7) / 4;
-  978   4                      right_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 16  
-
-  979   4                      
-  980   4                      /* ==========================================
-  981   4                       * 2. 蓝线：放弃寻线，直接锁死在屏幕最左侧！
-  982   4                       * (假设 1 是你屏幕最左边的有效坐标)
-  983   4                       * ========================================== */
-  984   4                      left_line_list[r] = 1; 
-  985   4                      
-  986   4                      /* ==========================================
-  987   4                       * 3. 极简截断保护
-  988   4                       * ========================================== */
-  989   4                      /* 如果右边切进来的绿线，已经撞到了屏幕最左侧(和蓝线重合了)，
-  990   4                         说明这个出岛的“漏斗”已经闭合了，上面的部分没必要再算了！ */
-  991   4                      if (right_line_list[r] <= 2) {
-  992   5                          break; 
-  993   5                      }
-  994   4      
-  995   4                      /* ==========================================
-  996   4                       * 4. 融合中线
-  997   4                       * ========================================== */
-  998   4                      /* 此时中线完全是由右侧 60 度的斜率主导的，
-  999   4                         没有任何外界图像噪点能干扰舵机的动作，平滑到极致！ */
- 1000   4                      mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
- 1001   4                  }
- 1002   3              }
- 1003   2          }
- 1004   1          
- 1005   1          // --- 状态 6：出岛恢复期 (双峰波谷搭桥 + 单峰左下兜底) ---
- 1006   1          else if (roundabout_state == 6) {
- 1007   2              int y;
- 1008   2              int pt_down_x = 0, pt_down_y = -1; // 下方波峰
- 1009   2              int trough_x = 255, trough_y = -1; // 波谷最深处
- 1010   2              int pt_up_x = 0, pt_up_y = -1;     // 上方波峰 (出岛 C 点)
- 1011   2              int draw_flag;
- 1012   2              /* ==========================================
- 1013   2               * 步骤 1 & 2：扫描最深波谷，并向上下寻找波峰 (逻辑不变)
- 1014   2               * ========================================== */
- 1015   2              for (y = MT9V03X_H - 15; y >= 20; y--) {
- 1016   3                  int curr_x = left_line_list[y];
- 1017   3                  if (curr_x > 1 && curr_x < MT9V03X_W - 5) {
- 1018   4                      if (curr_x < trough_x) {
- 1019   5                          trough_x = curr_x;
- 1020   5                          trough_y = y;
- 1021   5                      }
- 1022   4                  }
- 1023   3              }
- 1024   2      
- 1025   2              if (trough_y != -1) {
- 1026   3                  // 往下找下波峰
- 1027   3                  for (y = trough_y; y <= MT9V03X_H - 5; y++) {
- 1028   4                      int curr_x = left_line_list[y];
- 1029   4                      if (curr_x > pt_down_x && curr_x < MT9V03X_W - 5) {
- 1030   5                          pt_down_x = curr_x;
- 1031   5                          pt_down_y = y;
- 1032   5                      }
- 1033   4                  }
- 1034   3      
- 1035   3                  // 往上找上波峰
- 1036   3                  for (y = trough_y; y >= 15; y--) {
- 1037   4                      int curr_x = left_line_list[y];
- 1038   4                      if (curr_x > pt_up_x && curr_x < MT9V03X_W - 5) {
- 1039   5                          pt_up_x = curr_x;
- 1040   5                          pt_up_y = y;
- 1041   5                      }
- 1042   4                  }
- 1043   3      
- 1044   3                  /* ==========================================
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 17  
-
- 1045   3                   * 步骤 3：多级验证与搭桥连线 (增加左下兜底逻辑)
- 1046   3                   * ========================================== */
- 1047   3                  draw_flag = 0; // 是否执行连线的标志：0=不画，1=画
- 1048   3      
- 1049   3                  // 【情况 A：完美的双山丘波谷】
- 1050   3                  // 上下波峰都存在，且都比波谷向右凸出至少 4 个像素
- 1051   3                  if (pt_down_y != -1 && pt_up_y != -1 && pt_down_y > pt_up_y) {
- 1052   4                      if ((pt_down_x - trough_x >= 4) && (pt_up_x - trough_x >= 4)) {
- 1053   5                          draw_flag = 1; // 满足双峰条件
- 1054   5                      }
- 1055   4                  }
- 1056   3      
- 1057   3                  // 【情况 B：单山丘兜底 (用户新增逻辑)】
- 1058   3                  // 如果情况 A 没触发 (下山丘不存在或不明显)，但上山丘(C点)依然坚挺地存在着！
- 1059   3                  if (draw_flag == 0 && pt_up_y != -1 && (pt_up_x - trough_x >= 4)) {
- 1060   4                      
- 1061   4                      // 【核心兜底】：强行把下方波峰的锚点，拉到屏幕的最左下角！
- 1062   4                      pt_down_x = 1;                  // 屏幕最左边缘 (防止越界用 1)
- 1063   4                      pt_down_y = MT9V03X_H - 1;      // 屏幕最底端
- 1064   4                      
- 1065   4                      draw_flag = 1; // 满足单峰兜底条件，准备强行画线
- 1066   4                  }
- 1067   3      
- 1068   3                  /* ==========================================
- 1069   3                   * 步骤 4：统一执行插值连线
- 1070   3                   * ========================================== */
- 1071   3                  if (draw_flag == 1) {
- 1072   4                      // 计算两点之间的差值
- 1073   4                      int dx = pt_down_x - pt_up_x;
- 1074   4                      int dy = pt_down_y - pt_up_y;
- 1075   4      
- 1076   4                      // 从上波峰一路画到下方的目标点 (下波峰 或 左下角)
- 1077   4                      for (y = pt_up_y; y <= pt_down_y; y++) {
- 1078   5                          
- 1079   5                          // 极速整数插值算法
- 1080   5                          int new_x = pt_up_x + (dx * (y - pt_up_y)) / dy;
- 1081   5                          
- 1082   5                          // 刷新蓝线，并做好安全限制
- 1083   5                          left_line_list[y] = Limit_uint8(1, new_x, MT9V03X_W - 2);
- 1084   5                          
- 1085   5                          // 重新计算被刷新这一段的中线 (红线)
- 1086   5                          mid_line_list[y] = (left_line_list[y] + right_line_list[y]) / 2;
- 1087   5                      }
- 1088   4                  }
- 1089   3              }
- 1090   2          }
- 1091   1      }
- 1092          
- 1093          /* ===================== 中线加权 ===================== */
- 1094          uint8 mid_weight_list[120]=
- 1095          {
- 1096              1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,
- 1097              1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,
- 1098              1,1,1,1,1,1,1,1,1,1, 6,6,6,6,6,6,6,6,6,6,
- 1099              7,8,9,10,11,12,13,14,15,16,17,18,19,20,20,20,20,19,18,17,
- 1100              16,15,14,13,12,11,10,9,8,7,6,6,6,6,6,6,6,6,6,6,
- 1101              1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1
- 1102          };
- 1103          
- 1104           uint8 final_mid_line = MID_W;
- 1105          uint8 last_mid_line = MID_W;
- 1106          
- 1107          uint8 find_mid_line_weight(void)
- 1108          {
- 1109   1          uint8 mid_line_value = MID_W;
- 1110   1          uint8 mid_line = MID_W;
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 18  
-
- 1111   1          uint32 weight_midline_sum = 0;
- 1112   1          uint32 weight_sum = 0;
- 1113   1          uint8 i;
- 1114   1      
- 1115   1          for(i=MT9V03X_H-1; i>search_end_line; i--) {
- 1116   2              weight_midline_sum += mid_line_list[i] * mid_weight_list[i];
- 1117   2              weight_sum += mid_weight_list[i];
- 1118   2          }
- 1119   1          mid_line=(uint8)(weight_midline_sum/weight_sum);
- 1120   1          mid_line_value=last_mid_line*0.05+mid_line*0.95;
- 1121   1          last_mid_line=mid_line_value;
- 1122   1          return mid_line_value;
- 1123   1      }
- 1124          
- 1125          /* ===================== 画线 ===================== */
- 1126          void draw_line(void)
- 1127          {
- 1128   1          uint8 i;
- 1129   1          int px, py,ax,ay;
- 1130   1          int d;
- 1131   1      
- 1132   1          for(i = MT9V03X_H - 1; i>search_end_line; i--) {
- 1133   2              px = (Limit_uint8(1,left_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
- 1134   2              ips200_draw_point(px, py, RGB565_BLUE);
- 1135   2              ips200_draw_point(px, py+1, RGB565_BLUE);
- 1136   2      
- 1137   2              px = (Limit_uint8(1,right_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
- 1138   2              ips200_draw_point(px, py, RGB565_GREEN);
- 1139   2              ips200_draw_point(px, py+1, RGB565_GREEN);
- 1140   2      
- 1141   2              px = (Limit_uint8(1,mid_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
- 1142   2              ips200_draw_point(px, py, RGB565_RED);
- 1143   2              ips200_draw_point(px, py+1, RGB565_RED);
- 1144   2          }
- 1145   1          
- 1146   1          // 新增：画出 A 点红色大十字 (上下左右各 3 像素)
- 1147   1          // ==========================================
- 1148   1          if (pt_down_y > 0 && pt_down_y < MT9V03X_H) {
- 1149   2              // 1. 把相机坐标映射到 IPS 屏幕坐标
- 1150   2              ax = ((int)pt_down_x * 9) >> 3;
- 1151   2              ay = ((int)pt_down_y * 9) >> 3;
- 1152   2              
- 1153   2              
- 1154   2              // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
- 1155   2              for (d = -3; d <= 3; d++) {
- 1156   3                  // 安全限制，防止画到屏幕外导致死机
- 1157   3                  if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
- 1158   4                      ips200_draw_point(ax + d, ay, RGB565_RED); // 横线
- 1159   4                  }
- 1160   3                  if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
- 1161   4                      ips200_draw_point(ax, ay + d, RGB565_RED); // 竖线
- 1162   4                  }
- 1163   3              }
- 1164   2          }
- 1165   1          // 新增：画出 B 点红色大十字 (上下左右各 3 像素)
- 1166   1          // ==========================================
- 1167   1          if (pt_mid_y > 0 && pt_mid_y < MT9V03X_H) {
- 1168   2              // 1. 把相机坐标映射到 IPS 屏幕坐标
- 1169   2              ax = ((int)pt_mid_x * 9) >> 3;
- 1170   2              ay = ((int)pt_mid_y * 9) >> 3;
- 1171   2              
- 1172   2              
- 1173   2              // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
- 1174   2              for (d = -3; d <= 3; d++) {
- 1175   3                  // 安全限制，防止画到屏幕外导致死机
- 1176   3                  if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 19  
-
- 1177   4                      ips200_draw_point(ax + d, ay, RGB565_RED); // 横线
- 1178   4                  }
- 1179   3                  if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
- 1180   4                      ips200_draw_point(ax, ay + d, RGB565_RED); // 竖线
- 1181   4                  }
- 1182   3              }
- 1183   2          }
- 1184   1          // 新增：画出 C 点红色大十字 (上下左右各 3 像素)
- 1185   1          // ==========================================
- 1186   1          if (pt_up_y > 0 && pt_up_y < MT9V03X_H) {
- 1187   2              // 1. 把相机坐标映射到 IPS 屏幕坐标
- 1188   2              ax = ((int)pt_up_x * 9) >> 3;
- 1189   2              ay = ((int)pt_up_y * 9) >> 3;
- 1190   2              
- 1191   2              
- 1192   2              // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
- 1193   2              for (d = -3; d <= 3; d++) {
- 1194   3                  // 安全限制，防止画到屏幕外导致死机
- 1195   3                  if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
- 1196   4                      ips200_draw_point(ax + d, ay, RGB565_PURPLE); // 横线
- 1197   4                  }
- 1198   3                  if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
- 1199   4                      ips200_draw_point(ax, ay + d, RGB565_PURPLE); // 竖线
- 1200   4                  }
- 1201   3              }
- 1202   2          }
- 1203   1          // ==========================================
- 1204   1          if (exit_pt_x > 0 && exit_pt_y < MT9V03X_H) {
- 1205   2              // 1. 把相机坐标映射到 IPS 屏幕坐标
- 1206   2              ax = ((int)exit_pt_x * 9) >> 3;
- 1207   2              ay = ((int)exit_pt_y * 9) >> 3;
- 1208   2              
- 1209   2              
- 1210   2              // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
- 1211   2              for (d = -3; d <= 3; d++) {
- 1212   3                  // 安全限制，防止画到屏幕外导致死机
- 1213   3                  if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
- 1214   4                      ips200_draw_point(ax + d, ay, RGB565_BROWN); // 横线
- 1215   4                  }
- 1216   3                  if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
- 1217   4                      ips200_draw_point(ax, ay + d, RGB565_BROWN); // 竖线
- 1218   4                  }
- 1219   3              }
- 1220   2          }
- 1221   1      }
- 1222          
- 1223          #if (IPS200_OR_WIFI == 0)
+                           skip_draw = 0;
+               #if CAMERA_BINARY_OUTPUT_ENABLE
+                           make_binary_snapshot();
+               #endif
+                           draw_debug_overlay();
+                       }
+               #endif
+  785   2          }
+  786   1      }
+  787          
+  788          
+  789          #elif (IPS200_OR_WIFI == 1)
+               
                void camara_init(void)
                {
-                   ips200_init();
-                   ips200_show_string(0, 0, "mt9v03x init.");
-                   while(1) {
+                   wireless_uart_init();
+               
+                   while (wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST))
+                   {
                        system_delay_ms(100);
-                       if(mt9v03x_init()) ips200_show_string(0, 16, "mt9v03x reinit.");
-                       else break;
                    }
-                   ips200_show_string(0, 16, "init success.");
+               
+                   if (1 != WIFI_SPI_AUTO_CONNECT)
+                   {
+                       while (wifi_spi_socket_connect("TCP", WIFI_SPI_TARGET_IP, WIFI_SPI_TARGET_PORT, WIFI_SPI_LOCAL_PO
+             -RT))
+                       {
+                           system_delay_ms(100);
+                       }
+                   }
+               
+                   while (mt9v03x_init())
+                   {
+                       system_delay_ms(80);
+                   }
+               
+                   seekfree_assistant_interface_init(SEEKFREE_ASSISTANT_WIFI_SPI);
+                   seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], MT9V03X_W, MT9
+             -V03X_H);
+               
+               #if WIFI_BOUNDARY_ENABLE
+                   seekfree_assistant_camera_boundary_config(X_BOUNDARY, MT9V03X_H, left_line_list, right_line_list, mid
+             -_line_list, NULL, NULL, NULL);
+               #endif
                }
                
                void camara_task(void)
                {
-                   if(mt9v03x_finish_flag)
+                   if (mt9v03x_finish_flag)
                    {
                        mt9v03x_finish_flag = 0;
                
-                       img_threshold = Ostu();
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 20  
-
                        find_jidian();
-                       image_deal(); /* 基础扫线 */
-               
-               #if ROUNDABOUT_LOGIC_ENABLE
-                       judge_roundabout_dir(); /* 预判环岛方向 */
-                       zuohuan();
-                       patch_roundabout();
-               #endif
-                       
-                       final_mid_line = find_mid_line_weight();
+                       image_deal();
+                       (void)find_mid_line_weight();
                        mark_frame_processed();
                
-               #if CAMERA_DEBUG_DRAW_ENABLE
-                       if(++skip >= CAMERA_DEBUG_DRAW_INTERVAL) {
-                           skip = 0;
-               
-                           make_binary_image();
-                           ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
-                           draw_line();
-               
-                           ips200_show_string(10, 160, "mid_value:");
-                           ips200_show_uint8(80,160,final_mid_line);
-                           ips200_show_string(10, 175, "fps:");
-                           ips200_show_uint16(50,175,current_fps);
-                           ips200_show_string(10, 190, "state:");
-                           ips200_show_uint8(80,190,roundabout_state);
-                           ips200_show_string(10, 280, "island_dir:");
-                           ips200_show_uint8(100, 280, island_dir);
-                           ips200_show_uint8(35,210,exit_pt_x);
-                           ips200_show_uint8(80,210,exit_pt_y);
-                           ips200_show_uint8(35,235,pt_mid_x);
-                           ips200_show_uint8(80,235,pt_mid_y);
-                           ips200_show_uint8(35,260,pt_up_x);
-                           ips200_show_uint8(80,260,pt_up_y);
-                       }
+               #if CAMERA_BINARY_OUTPUT_ENABLE
+                       make_binary_snapshot();
                #endif
+                       seekfree_assistant_camera_send();
                    }
                }
                
-               #elif (IPS200_OR_WIFI == 1)
- 1283          
- 1284          // 【核心修改 1】：把 INCLUDE_BOUNDARY_TYPE 改为 1，开启边线叠加传输！
- 1285          #define INCLUDE_BOUNDARY_TYPE   1
- 1286          #define WIFI_SSID_TEST          "Car"
- 1287          #define WIFI_PASSWORD_TEST      "431431431"
- 1288          
- 1289          /* ==========================================
- 1290           * 专用函数：通过 WiFi 虚拟串口发送调试文本
- 1291           * 替代原本屏幕上的 ips200_show_string
- 1292           * ========================================== */
- 1293          
- 1294          
- 1295          void wifi_send_debug_text(void)
- 1296          {
- 1297   1          char tx[128]; 
- 1298   1          uint8 p = 0;
- 1299   1          
- 1300   1          // 拼接基础状态，这三个数据最关键！
- 1301   1          tx[p++] = 'D'; tx[p++] = 'i'; tx[p++] = 'r'; tx[p++] = ':'; p += u16_to_str(&tx[p], island_dir); tx[p
-             -++] = ' ';
- 1302   1          tx[p++] = 'S'; tx[p++] = 't'; tx[p++] = 'a'; tx[p++] = 't'; tx[p++] = 'e'; tx[p++] = ':'; p += u16_to
-             -_str(&tx[p], roundabout_state); tx[p++] = ' ';
- 1303   1          
- 1304   1          // 拼接 A 和 B 点坐标，看看到底找到没有
- 1305   1          tx[p++] = 'A'; tx[p++] = '('; p += u16_to_str(&tx[p], pt_down_x); tx[p++] = ','; p += u16_to_str(&tx[
-             -p], pt_down_y); tx[p++] = ')'; tx[p++] = ' ';
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 21  
+               
+               #else
+C251 COMPILER V5.60.0,  camera                                                             01/05/26  14:22:08  PAGE 14  
 
- 1306   1          tx[p++] = 'B'; tx[p++] = '('; p += u16_to_str(&tx[p], pt_mid_x); tx[p++] = ','; p += u16_to_str(&tx[p
-             -], pt_mid_y); tx[p++] = ')'; 
- 1307   1          
- 1308   1          tx[p++] = '\r'; tx[p++] = '\n';
- 1309   1          
- 1310   1          // 发送给逐飞助手右侧的文本框
- 1311   1          wireless_uart_send_buffer((uint8*)tx, p);
- 1312   1      }
- 1313          
- 1314          void camara_init(void)
- 1315          {
- 1316   1          wireless_uart_init();
- 1317   1          while(wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST)) { system_delay_ms(100); }
- 1318   1          if(1 != WIFI_SPI_AUTO_CONNECT) {
- 1319   2              while(wifi_spi_socket_connect("TCP", WIFI_SPI_TARGET_IP, WIFI_SPI_TARGET_PORT, WIFI_SPI_LOCAL_POR
-             -T)) { system_delay_ms(100); }
- 1320   2          }
- 1321   1          while(mt9v03x_init()) { system_delay_ms(100); }
- 1322   1      
- 1323   1          seekfree_assistant_interface_init(SEEKFREE_ASSISTANT_WIFI_SPI);
- 1324   1          
- 1325   1          // 【核心修改 2】：配置图像源
- 1326   1          // 这里默认发送灰度原图。如果你想看二值化图，把 mt9v03x_image[0] 换成 bin_image[0] 即可
- 1327   1          seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], MT9V03X_W, MT9
-             -V03X_H);
- 1328   1      
- 1329   1      #if(1 == INCLUDE_BOUNDARY_TYPE)
- 1330   1          // 【核心修改 3】：配置三根边线！
- 1331   1          // 因为我们的数组是按行(Y)存放横坐标(X)的，所以采用 X_BOUNDARY 类型。
- 1332   1          // 按顺序把 左线、右线、中线 喂给助手，助手会自动把它们按不同颜色画在图传上。
- 1333   1          seekfree_assistant_camera_boundary_config(X_BOUNDARY, MT9V03X_H, left_line_list, right_line_list, mid
-             -_line_list, NULL, NULL, NULL);
- 1334   1      #endif
- 1335   1      }
- 1336          
- 1337          void camara_task(void)
- 1338          {
- 1339   1          if(mt9v03x_finish_flag)
- 1340   1          {
- 1341   2              mt9v03x_finish_flag = 0;  
- 1342   2      
- 1343   2              img_threshold = Ostu();
- 1344   2              find_jidian();
- 1345   2              image_deal(); /* 基础扫线 */
- 1346   2      
- 1347   2      #if ROUNDABOUT_LOGIC_ENABLE
-                       judge_roundabout_dir(); /* 预判环岛方向 */
-                       zuohuan();
-                       patch_roundabout();
+               #error "IPS200_OR_WIFI must be 0 or 1."
                #endif
- 1352   2              
- 1353   2              final_mid_line = find_mid_line_weight();
- 1354   2              mark_frame_processed();
- 1355   2                
- 1356   2                // 如果你在初始化里改成了发 bin_image[0]，这里记得取消注释生成二值化图
- 1357   2              make_binary_image();
- 1358   2              
- 1359   2              // 触发发送：打包图像 + 左/右/中三条线，一并推给上位机
- 1360   2              seekfree_assistant_camera_send();
- 1361   2              // 【核心修改 4】：加上降频发送保护！
- 1362   2              // WiFi 带宽有限，如果每帧都发，会造成严重拥堵和控制延迟。
- 1363   2              // 这里复用 CAMERA_DEBUG_DRAW_INTERVAL (比如设置成8，即每8帧发一次)
- 1364   2              if(++skip >= CAMERA_DEBUG_DRAW_INTERVAL) {
- 1365   3                  skip = 0;
- 1366   3                  
- 1367   3                  
-C251 COMPILER V5.60.0,  camera                                                             22/04/26  16:39:19  PAGE 22  
-
- 1368   3                  wifi_send_debug_text();
- 1369   3                 
- 1370   3              }
- 1371   2          }
- 1372   1      }
- 1373          #else
-               #error "IPS200_OR_WIFI must be 0 (IPS200) or 1 (WiFi)."
-               #endif
+  843          
+  844          
+  845          
+  846          
+  847          
+  848          
+  849          
+  850          
+  851          
+  852          
+  853          
+  854          
+  855          
+  856          
+  857          
+  858          
+  859          
+  860          
+  861          
+  862          
+  863          
+  864          
+  865          
 
 
 Module Information          Static   Overlayable
 ------------------------------------------------
   code size            =    ------     ------
-  ecode size           =     18228     ------
+  ecode size           =      6015     ------
   data size            =    ------     ------
   idata size           =    ------     ------
   pdata size           =    ------     ------
-  xdata size           =     28483     ------
+  xdata size           =       584     ------
   xdata-const size     =    ------     ------
   edata size           =    ------     ------
   bit size             =    ------     ------
@@ -1455,7 +928,7 @@ Module Information          Static   Overlayable
   far data size        =    ------     ------
   huge data size       =    ------     ------
   const size           =    ------     ------
-  hconst size          =       844     ------
+  hconst size          =       140     ------
 End of Module Information.
 
 

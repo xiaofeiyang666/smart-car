@@ -1,0 +1,690 @@
+#include "control.h"
+#include "pid.h"
+#include "encoder.h"
+#include "motor.h"
+#include "servo.h"
+#include "camera.h"
+#include "brushless.h"
+// 目标速度（0~90）到编码器目标脉冲映射
+#define MAX_SPEED_PULSES 4000
+#define BASE_SPEED_MATCH_GAIN 1.02f              // 基础速度标定系数：闭环偏慢就增大，冲弯就减小
+// ===================== 精简控制参数（3 路况模式） =====================
+// ===================== 调参顺序建议 =====================
+// 1) 先调转向稳定：直线不抖、不过度回摆（先改死区/低通/步进）。
+// 2) 再调入弯识别：保证长直后能提前识别弯道（改评分与模式阈值）。
+// 3) 再调速度：先保证不冲弯，再逐步提速（改重刹与速度缩放参数）。
+// 4) 最后调差速：只做辅助，避免后轮主导车身。
+// 路况模式：直道 / 普通弯 / 急弯
+// 用曲率评分自动切换，去掉复杂状态机
+// ===================== 可调节参数 =====================
+#define CFG_SERVO_DEADBAND_PIX 4.4f          // 直线抖动优先调：增大更稳，减小更灵敏
+#define CFG_SERVO_OUT_LIMIT 20.0f            // 总打角限幅：增大转向更强，过大有机械风险
+#define CFG_MODE_CURVE_ON 0.45f              // 进入弯道阈值：增大可减少直线误判
+#define CFG_MODE_SHARP_ON 0.90f              // 进入急弯阈值：增大可减少急弯误触发
+#define CFG_PREVIEW_FAR_STRAIGHT_Y 40        // 直道远前瞻行：增大更稳，减小更灵敏
+#define CFG_PREVIEW_FAR_SHARP_Y 22           // 急弯远前瞻行：减小可提前识别急弯
+#define CFG_STEER_STEP_STRAIGHT 0.60f        // 直线步进：减小更稳，增大纠偏更快
+#define CFG_STEER_FF_LIMIT 4.5f              // 前馈限幅：减小可抑制小误差大修正
+#define CFG_FF_STRAIGHT_LIMIT_MUL 0.22f      // 直线前馈限幅倍率：减小直线更稳
+#define CFG_TARGET_STEP_UP_STRAIGHT 1.8f     // 直线升速斜率：增大提速快，减小更稳
+#define CFG_DIFF_K_GAIN 0.70f                // 差速随弯增益：增大后轮辅助更强
+#define CFG_DIFF_STEER_DEADBAND 5.5f         // 差速死区：增大可抑制直线差速抽动
+
+// ------------------------- 固定参数 -------------------------
+// 前瞻行
+#define PREVIEW_Y_NEAR (MT9V03X_H - 14)      // 基础近前瞻行
+#define PREVIEW_Y_FAR 30                     // 基础远前瞻行
+#define PREVIEW_FAR_CURVE_Y PREVIEW_Y_FAR    // 弯道远前瞻行
+
+// 传感滤波
+#define OFFSET_LPF_ALPHA_STRAIGHT 0.45f
+#define OFFSET_LPF_ALPHA_CURVE 0.54f
+#define PREVIEW_LPF_ALPHA 0.55f
+#define GYRO_LPF_ALPHA 0.30f
+
+// 曲率评分
+#define SCORE_PREVIEW_FULL 12.0f
+#define SCORE_DPREVIEW_FULL 1.7f
+#define SCORE_OFFSET_FULL 28.0f
+#define SCORE_DPREVIEW_WEIGHT 0.35f
+#define SCORE_OFFSET_WEIGHT 0.20f
+
+// 模式切换阈值（带滞回）
+#define MODE_CURVE_OFF 0.20f
+#define MODE_SHARP_OFF 0.48f
+#define CURVE_EXIT_HOLD_CYCLES 14
+#define MODE_HOLD_INTENSITY 0.72f
+#define MODE_CURVE_RISE_ON 0.07f
+#define MODE_SHARP_RISE_ON 0.14f
+
+// 舵机固定参数
+#define RIGHT_TURN_STEER_MUL 1.05f
+#define LEFT_TURN_STEER_MUL 1.04f
+#define STEER_KP_ADD 1.10f
+#define STEER_KD_ADD 0.20f
+#define STEER_FF_BASE_MUL 0.28f
+#define STEER_FF_ADD 1.27f
+#define STEER_DPREVIEW_FF_K 0.65f
+#define STEER_RAW_ALPHA_STRAIGHT 0.14f
+#define STEER_RAW_ALPHA_SHARP 0.54f
+#define STEER_STEP_SHARP 7.20f
+#define STEER_REVERSE_DPREVIEW_TH 1.8f
+#define STEER_REVERSE_STEP_MUL 1.35f
+
+// Err/ErrD 分区固定参数
+#define ERR_SMALL_TH 3.0f
+#define ERR_MID_TH 8.0f
+#define ERRD_LPF_ALPHA 0.35f
+#define ERRD_SMALL_TH 0.8f
+#define ERRD_MID_TH 2.5f
+#define KP_MUL_ERR_SMALL 0.72f
+#define KP_MUL_ERR_MID 1.00f
+#define KP_MUL_ERR_LARGE 1.30f
+#define KD_MUL_ERRD_SMALL 1.18f
+#define KD_MUL_ERRD_MID 1.00f
+#define KD_MUL_ERRD_LARGE 0.88f
+#define STEP_MUL_ERR_SMALL 0.58f
+#define STEP_MUL_ERR_MID 1.00f
+#define STEP_MUL_ERR_LARGE 1.95f
+#define SMALL_ERR_FAST_KP_MUL 0.90f
+#define SMALL_ERR_FAST_KD_MUL 1.10f
+#define SMALL_ERR_FAST_STEP_MUL 0.80f
+#define ERR_LARGE_BLEND_TH 18.0f
+#define ERRD_LARGE_BLEND_TH 5.5f
+#define MODE_INTENSITY_LPF_ALPHA 0.28f
+#define STEER_STEP_MIN 0.45f
+#define FF_STRAIGHT_PREVIEW_LOW_TH 1.8f
+#define FF_STRAIGHT_PREVIEW_HIGH_TH 3.0f
+#define FF_STRAIGHT_DPREVIEW_LOW_TH 0.55f
+#define FF_STRAIGHT_DPREVIEW_HIGH_TH 1.05f
+#define FF_STRAIGHT_KEEP_LOW 0.10f
+#define FF_STRAIGHT_KEEP_HIGH 0.35f
+
+// 速度固定参数
+#define SPEED_DROP_MAX 0.45f
+#define SPEED_CURVE_K 1.20f
+#define SPEED_STEER_K 0.54f
+#define SPEED_CURVE_MIN 0.40f
+#define SPEED_STEER_MIN 0.46f
+#define SPEED_SCALE_MIN 0.34f
+#define SPEED_SCALE_MAX 0.94f
+#define HARD_BRAKE_PREVIEW_TH 5.2f
+#define HARD_BRAKE_DPREVIEW_TH 0.30f
+#define HARD_BRAKE_SCORE_RISE_TH 0.10f
+#define HARD_BRAKE_KEEP 0.48f
+#define HARD_BRAKE_HOLD_CYCLES 16
+#define HARD_BRAKE_CURVE_HOLD_CYCLES 14
+#define TRANSITION_BRAKE_DPREVIEW_TH 0.75f
+#define TRANSITION_BRAKE_KEEP 0.82f
+#define TARGET_STEP_UP_SHARP 0.40f
+#define TARGET_STEP_DOWN 220.0f
+
+// 后轮差速固定参数
+#define DIFF_K_BASE 0.55f
+#define RIGHT_TURN_DIFF_MUL 1.18f
+#define LEFT_TURN_DIFF_MUL 1.00f
+#define DIFF_FILTER_ALPHA 0.22f
+#define DIFF_STEP_STRAIGHT 8.0f
+#define DIFF_STEP_SHARP 22.0f
+#define DIFF_STEP_RIGHT_MUL 0.95f
+#define DIFF_CAP_RATIO 0.25f
+#define DIFF_CAP_MIN 14
+#define DIFF_INNER_MIN_RATIO 0.20f
+#define DIFF_INNER_MIN_STEER_ON 11.0f
+#define DIFF_INNER_MIN_SCORE_ON 0.78f
+#define DIFF_INNER_MIN_STEER_OFF 8.0f
+#define DIFF_INNER_MIN_SCORE_OFF 0.58f
+
+// ------------------------- 兼容旧参数名（保持逻辑不变） -------------------------
+#define MODE_CURVE_ON CFG_MODE_CURVE_ON
+#define MODE_SHARP_ON CFG_MODE_SHARP_ON
+#define PREVIEW_FAR_STRAIGHT_Y CFG_PREVIEW_FAR_STRAIGHT_Y
+#define PREVIEW_FAR_SHARP_Y CFG_PREVIEW_FAR_SHARP_Y
+#define SERVO_SOFT_DEADBAND_PIX CFG_SERVO_DEADBAND_PIX
+#define SERVO_OUT_LIMIT CFG_SERVO_OUT_LIMIT
+#define STEER_STEP_STRAIGHT CFG_STEER_STEP_STRAIGHT
+#define STEER_FF_LIMIT CFG_STEER_FF_LIMIT
+#define FF_STRAIGHT_LIMIT_MUL CFG_FF_STRAIGHT_LIMIT_MUL
+#define TARGET_STEP_UP_STRAIGHT CFG_TARGET_STEP_UP_STRAIGHT
+#define DIFF_K_GAIN CFG_DIFF_K_GAIN
+#define DIFF_STEER_DEADBAND CFG_DIFF_STEER_DEADBAND
+volatile uint8 print_flag = 0;
+// 外部保留接口：基础速度（0~90）
+int target_speed_base = 22;                // 基础速度指令：建议每次 +1 逐步提速验证
+// 三个主控制参数
+float servo_kp = 0.36f;                    // 基础比例：增大转向更快，过大会抖
+float servo_kd = 0.10f;                    // 基础阻尼：增大更稳，过大变迟钝
+float servo_kff = 0.22f;                   // 基础前馈：增大提前打角更强
+volatile int16 g_offset_ctrl_x10 = 0;
+typedef enum
+{
+    ROAD_STRAIGHT = 0,
+    ROAD_CURVE = 1,
+    ROAD_SHARP = 2
+} road_mode_e;
+static float abs_f(float x)
+{
+    return (x >= 0.0f) ? x : -x;
+}
+static float clamp_f(float x, float min_v, float max_v)
+{
+    if (x < min_v)
+        return min_v;
+    if (x > max_v)
+        return max_v;
+    return x;
+}
+// 由舵机打角映射到Ackermann差速系数gamma=(Rout-Rin)/(Rout+Rin)
+// 数据来自机械测量表（3~20度），并做线性插值
+static float diff_gamma_from_steer(float abs_steer)
+{
+    static const float gamma_lut[21] = {
+        0.0000f, 0.0000f, 0.0000f, 0.0382f, 0.0512f, 0.0643f, 0.0774f,
+        0.0913f, 0.1053f, 0.1201f, 0.1346f, 0.1498f, 0.1669f, 0.1835f,
+        0.2017f, 0.2198f, 0.2442f, 0.2684f, 0.2928f, 0.3262f, 0.3550f};
+    int idx_low;
+    int idx_high;
+    float frac;
+
+    if (abs_steer <= 0.0f)
+        return 0.0f;
+    if (abs_steer <= 3.0f)
+        return gamma_lut[3] * (abs_steer / 3.0f);
+    if (abs_steer >= 20.0f)
+        return gamma_lut[20];
+
+    idx_low = (int)abs_steer;
+    if (idx_low < 3)
+        idx_low = 3;
+    if (idx_low >= 20)
+        idx_low = 19;
+    idx_high = idx_low + 1;
+    frac = abs_steer - (float)idx_low;
+
+    return gamma_lut[idx_low] + (gamma_lut[idx_high] - gamma_lut[idx_low]) * frac;
+}
+void control_init(void)
+{
+    left_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
+    right_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
+}
+void control_loop(void)
+{
+    static uint8 loop_cnt = 0;
+    static uint8 lpf_init = 0;
+    static uint8 hard_brake_cnt = 0;
+    static uint8 inner_min_enable = 0;
+    static uint8 curve_hold_cnt = 0;
+    static road_mode_e road_mode = ROAD_STRAIGHT;
+    static float curve_score_last = 0.0f;
+    static float mode_intensity_filtered = 0.0f;
+    static float offset_filtered = 0.0f;
+    static float preview_filtered = 0.0f;
+    static float preview_last = 0.0f;
+    static float gyro_z_filtered = 0.0f;
+    static float steer_raw_filtered = 0.0f;
+    static float steer_out_last = 0.0f;
+    static float err_last = 0.0f;
+    static float errd_filtered = 0.0f;
+    static float target_pulses_ramped = 0.0f;    static float diff_filtered = 0.0f;
+    static float diff_limited = 0.0f;
+    int near_y;
+    int far_y;    int near_mid;
+    int far_mid;
+    int offset_raw;
+    float preview_raw;
+    float preview_delta;
+    float preview_delta_abs;
+    float offset_lpf_alpha;
+    float gyro_z_actual;
+    float offset_ctrl;
+    float err_abs;
+    float errd_raw;
+    float errd_abs;
+    float kp_err_mul;
+    float kd_errd_mul;
+    float step_err_mul;
+    float abs_preview;
+    float abs_offset;
+    float curve_score;
+    float curve_score_rise;
+    float score_from_preview;
+    float score_from_dpreview;
+    float score_from_offset;
+    float mode_intensity;
+    float mode_intensity_raw;
+    float blend_t;
+    float kp_now;
+    float kd_now;
+    float kff_now;
+    float ff_term;
+    float ff_gate;
+    float ff_limit_now;
+    float steer_raw;
+    float steer_alpha;
+    float steer_step_limit;
+    float delta_out;
+    float steer_out;
+    float abs_steer;
+    float speed_scale_mode;
+    float speed_scale_curve;
+    float speed_scale_steer;
+    float speed_scale_total;
+    float steer_norm;
+    int base_pulses;
+    int target_pulses_des;
+    int target_pulses_min;
+    int target_pulses_max;
+    int target_pulses;
+    float target_step_up;
+    float diff_k;
+    float steer_for_diff;
+    float diff_gamma;
+    float diff_cmd;
+    float diff_step_limit;
+    float diff_delta;
+    int diff_speed;
+    int diff_cap;
+    int left_target_pulses;
+    int right_target_pulses;
+    int inner_min_pulses;
+        // 1) 固定前瞻采样：动态前瞻统一放在 camera 侧，control 不再二次切换
+    near_y = PREVIEW_Y_NEAR;
+    if (near_y >= MT9V03X_H)
+        near_y = MT9V03X_H - 1;
+    if (near_y <= search_end_line)
+        near_y = search_end_line + 1;
+
+    far_y = PREVIEW_Y_FAR;
+    if (far_y <= search_end_line)
+        far_y = search_end_line + 1;
+    if (far_y >= MT9V03X_H)
+        far_y = MT9V03X_H - 1;
+
+    near_mid = mid_line_list[near_y];
+    far_mid = mid_line_list[far_y];
+    preview_raw = (float)(far_mid - near_mid);
+    offset_raw = (int)final_mid_line - MID_W;
+    if (!lpf_init)
+    {
+        mode_intensity_filtered = 0.0f;
+        offset_filtered = (float)offset_raw;
+        preview_filtered = preview_raw;
+        preview_last = preview_raw;
+        gyro_z_filtered = 0.0f;
+        steer_raw_filtered = 0.0f;
+        steer_out_last = 0.0f;
+        err_last = 0.0f;
+        errd_filtered = 0.0f;
+        target_pulses_ramped = 0.0f;
+        diff_filtered = 0.0f;
+        diff_limited = 0.0f;
+        hard_brake_cnt = 0;
+        inner_min_enable = 0;
+        curve_hold_cnt = 0;
+        road_mode = ROAD_STRAIGHT;
+        curve_score_last = 0.0f;
+        lpf_init = 1;
+    }
+    // 2) 滤波
+    if (abs_f(preview_filtered) >= 2.8f)
+    {
+        offset_lpf_alpha = OFFSET_LPF_ALPHA_CURVE;
+    }
+    else
+    {
+        offset_lpf_alpha = OFFSET_LPF_ALPHA_STRAIGHT;
+    }
+    offset_filtered = offset_filtered * (1.0f - offset_lpf_alpha) + (float)offset_raw * offset_lpf_alpha;
+    preview_filtered = preview_filtered * (1.0f - PREVIEW_LPF_ALPHA) + preview_raw * PREVIEW_LPF_ALPHA;
+    preview_delta = preview_filtered - preview_last;
+    preview_last = preview_filtered;
+    preview_delta_abs = abs_f(preview_delta);
+    imu660ra_get_gyro();
+    gyro_z_actual = imu660ra_gyro_transition(imu660ra_gyro_z);
+    gyro_z_filtered = gyro_z_filtered * (1.0f - GYRO_LPF_ALPHA) + gyro_z_actual * GYRO_LPF_ALPHA;
+    // 3) 曲率评分
+    abs_preview = abs_f(preview_filtered);
+    abs_offset = abs_f(offset_filtered);
+    score_from_preview = abs_preview / SCORE_PREVIEW_FULL;
+    score_from_dpreview = preview_delta_abs / SCORE_DPREVIEW_FULL;
+    score_from_offset = abs_offset / SCORE_OFFSET_FULL;
+    curve_score = score_from_preview + SCORE_DPREVIEW_WEIGHT * score_from_dpreview + SCORE_OFFSET_WEIGHT * score_from_offset;
+    curve_score = clamp_f(curve_score, 0.0f, 1.6f);
+    curve_score_rise = curve_score - curve_score_last;
+    if (curve_score_rise < 0.0f)
+        curve_score_rise = 0.0f;
+    curve_score_last = curve_score;
+    // 4) 路况模式切换（滞回 + 出弯保持）
+    if (road_mode == ROAD_STRAIGHT)
+    {
+        if ((curve_score >= MODE_SHARP_ON) || (curve_score_rise >= MODE_SHARP_RISE_ON))
+        {
+            road_mode = ROAD_SHARP;
+        }
+        else if ((curve_score >= MODE_CURVE_ON) || (curve_score_rise >= MODE_CURVE_RISE_ON))
+        {
+            road_mode = ROAD_CURVE;
+        }
+    }
+    else if (road_mode == ROAD_CURVE)
+    {
+        if ((curve_score >= MODE_SHARP_ON) || (curve_score_rise >= MODE_SHARP_RISE_ON))
+        {
+            road_mode = ROAD_SHARP;
+        }
+        else if (curve_score <= MODE_CURVE_OFF)
+        {
+            road_mode = ROAD_STRAIGHT;
+        }
+    }
+    else
+    {
+        if (curve_score <= MODE_SHARP_OFF)
+        {
+            if (curve_score <= MODE_CURVE_OFF)
+                road_mode = ROAD_STRAIGHT;
+            else
+                road_mode = ROAD_CURVE;
+        }
+    }
+    if (road_mode == ROAD_STRAIGHT)
+    {
+        if (curve_hold_cnt > 0)
+            curve_hold_cnt--;
+    }
+    else
+    {
+        curve_hold_cnt = CURVE_EXIT_HOLD_CYCLES;
+    }
+    // 模式强度（0/0.55/1.0），并对模式切换做低通平滑，避免增益突变
+    if (road_mode == ROAD_STRAIGHT)
+    {
+        if (curve_hold_cnt > 0)
+            mode_intensity_raw = MODE_HOLD_INTENSITY;
+        else
+            mode_intensity_raw = 0.0f;
+    }
+    else if (road_mode == ROAD_CURVE)
+    {
+        mode_intensity_raw = 0.55f;
+    }
+    else
+    {
+        mode_intensity_raw = 1.0f;
+    }
+    mode_intensity_filtered = mode_intensity_filtered * (1.0f - MODE_INTENSITY_LPF_ALPHA) + mode_intensity_raw * MODE_INTENSITY_LPF_ALPHA;
+    mode_intensity = mode_intensity_filtered;
+    // 5) 偏差软死区
+    offset_ctrl = offset_filtered;
+    if (offset_ctrl <= SERVO_SOFT_DEADBAND_PIX && offset_ctrl >= -SERVO_SOFT_DEADBAND_PIX)
+    {
+        offset_ctrl = 0.0f;
+    }
+    else if (offset_ctrl > 0.0f)
+    {
+        offset_ctrl -= SERVO_SOFT_DEADBAND_PIX;
+    }
+    else
+    {
+        offset_ctrl += SERVO_SOFT_DEADBAND_PIX;
+    }
+    // 6) Err/ErrD 分区：小误差抑抖，大误差保响应
+    err_abs = abs_f(offset_ctrl);
+    errd_raw = offset_ctrl - err_last;
+    err_last = offset_ctrl;
+    errd_filtered = errd_filtered * (1.0f - ERRD_LPF_ALPHA) + errd_raw * ERRD_LPF_ALPHA;
+    errd_abs = abs_f(errd_filtered);
+
+    // 按误差幅值给比例与步进分区（线性插值，避免阈值跳变）
+    if (err_abs <= ERR_SMALL_TH)
+    {
+        kp_err_mul = KP_MUL_ERR_SMALL;
+        step_err_mul = STEP_MUL_ERR_SMALL;
+    }
+    else if (err_abs <= ERR_MID_TH)
+    {
+        blend_t = (err_abs - ERR_SMALL_TH) / (ERR_MID_TH - ERR_SMALL_TH);
+        kp_err_mul = KP_MUL_ERR_SMALL + (KP_MUL_ERR_MID - KP_MUL_ERR_SMALL) * blend_t;
+        step_err_mul = STEP_MUL_ERR_SMALL + (STEP_MUL_ERR_MID - STEP_MUL_ERR_SMALL) * blend_t;
+    }
+    else if (err_abs <= ERR_LARGE_BLEND_TH)
+    {
+        blend_t = (err_abs - ERR_MID_TH) / (ERR_LARGE_BLEND_TH - ERR_MID_TH);
+        kp_err_mul = KP_MUL_ERR_MID + (KP_MUL_ERR_LARGE - KP_MUL_ERR_MID) * blend_t;
+        step_err_mul = STEP_MUL_ERR_MID + (STEP_MUL_ERR_LARGE - STEP_MUL_ERR_MID) * blend_t;
+    }
+    else
+    {
+        kp_err_mul = KP_MUL_ERR_LARGE;
+        step_err_mul = STEP_MUL_ERR_LARGE;
+    }
+
+    // 按误差变化率给阻尼分区（线性插值，避免阻尼突变）
+    if (errd_abs <= ERRD_SMALL_TH)
+    {
+        kd_errd_mul = KD_MUL_ERRD_SMALL;
+    }
+    else if (errd_abs <= ERRD_MID_TH)
+    {
+        blend_t = (errd_abs - ERRD_SMALL_TH) / (ERRD_MID_TH - ERRD_SMALL_TH);
+        kd_errd_mul = KD_MUL_ERRD_SMALL + (KD_MUL_ERRD_MID - KD_MUL_ERRD_SMALL) * blend_t;
+    }
+    else if (errd_abs <= ERRD_LARGE_BLEND_TH)
+    {
+        blend_t = (errd_abs - ERRD_MID_TH) / (ERRD_LARGE_BLEND_TH - ERRD_MID_TH);
+        kd_errd_mul = KD_MUL_ERRD_MID + (KD_MUL_ERRD_LARGE - KD_MUL_ERRD_MID) * blend_t;
+    }
+    else
+    {
+        kd_errd_mul = KD_MUL_ERRD_LARGE;
+    }
+
+    // 小误差但变化快，视为直线抖动趋势，进一步抑制舵机抽动
+    if ((err_abs <= ERR_SMALL_TH) && (errd_abs >= ERRD_MID_TH))
+    {
+        kp_err_mul *= SMALL_ERR_FAST_KP_MUL;
+        kd_errd_mul *= SMALL_ERR_FAST_KD_MUL;
+        step_err_mul *= SMALL_ERR_FAST_STEP_MUL;
+    }
+
+    // 7) 舵机控制
+    kp_now = servo_kp * (1.0f + STEER_KP_ADD * mode_intensity) * kp_err_mul;
+    kd_now = servo_kd * (1.0f + STEER_KD_ADD * mode_intensity) * kd_errd_mul;
+    kff_now = servo_kff * (STEER_FF_BASE_MUL + STEER_FF_ADD * mode_intensity);
+    ff_gate = 1.0f;
+    ff_limit_now = STEER_FF_LIMIT;
+    if ((road_mode == ROAD_STRAIGHT) && (curve_hold_cnt == 0))
+    {
+        if ((abs_preview <= FF_STRAIGHT_PREVIEW_LOW_TH) && (preview_delta_abs <= FF_STRAIGHT_DPREVIEW_LOW_TH))
+        {
+            ff_gate = FF_STRAIGHT_KEEP_LOW;
+        }
+        else if ((abs_preview <= FF_STRAIGHT_PREVIEW_HIGH_TH) && (preview_delta_abs <= FF_STRAIGHT_DPREVIEW_HIGH_TH))
+        {
+            ff_gate = FF_STRAIGHT_KEEP_HIGH;
+        }
+        ff_limit_now *= FF_STRAIGHT_LIMIT_MUL;
+    }
+    ff_term = kff_now * (preview_filtered + STEER_DPREVIEW_FF_K * preview_delta) * ff_gate;
+    ff_term = clamp_f(ff_term, -ff_limit_now, ff_limit_now);
+    steer_raw = (-kp_now * offset_ctrl) - (kd_now * gyro_z_filtered) + ff_term;
+    if (steer_raw >= 0.0f)
+        steer_raw *= RIGHT_TURN_STEER_MUL;
+    else
+        steer_raw *= LEFT_TURN_STEER_MUL;
+    steer_alpha = STEER_RAW_ALPHA_STRAIGHT + (STEER_RAW_ALPHA_SHARP - STEER_RAW_ALPHA_STRAIGHT) * mode_intensity;
+    steer_raw_filtered = steer_raw_filtered * (1.0f - steer_alpha) + steer_raw * steer_alpha;
+    steer_raw = clamp_f(steer_raw_filtered, -SERVO_OUT_LIMIT, SERVO_OUT_LIMIT);
+    steer_step_limit = (STEER_STEP_STRAIGHT + (STEER_STEP_SHARP - STEER_STEP_STRAIGHT) * mode_intensity) * step_err_mul;
+    if (steer_step_limit < STEER_STEP_MIN)
+        steer_step_limit = STEER_STEP_MIN;
+    if ((preview_delta_abs >= STEER_REVERSE_DPREVIEW_TH) &&
+        ((steer_out_last > 0.0f && steer_raw < 0.0f) ||
+         (steer_out_last < 0.0f && steer_raw > 0.0f)))
+    {
+        steer_step_limit *= STEER_REVERSE_STEP_MUL;
+    }
+    delta_out = steer_raw - steer_out_last;
+    if (delta_out > steer_step_limit)
+        steer_out = steer_out_last + steer_step_limit;
+    else if (delta_out < -steer_step_limit)
+        steer_out = steer_out_last - steer_step_limit;
+    else
+        steer_out = steer_raw;
+    steer_out = clamp_f(steer_out, -SERVO_OUT_LIMIT, SERVO_OUT_LIMIT);
+    steer_out_last = steer_out;
+    abs_steer = abs_f(steer_out);
+    servo_set_angle(SERVO_CENTER + steer_out);
+    // 7) 速度控制
+    base_pulses = (int)((float)(((long)target_speed_base * MAX_SPEED_PULSES) / 90) * BASE_SPEED_MATCH_GAIN);
+    speed_scale_mode = 1.0f - SPEED_DROP_MAX * mode_intensity;
+    speed_scale_curve = 1.0f / (1.0f + SPEED_CURVE_K * curve_score * curve_score);
+    if (speed_scale_curve < SPEED_CURVE_MIN)
+        speed_scale_curve = SPEED_CURVE_MIN;
+    steer_norm = abs_steer / SERVO_OUT_LIMIT;
+    if (steer_norm > 1.0f)
+        steer_norm = 1.0f;
+    speed_scale_steer = 1.0f - SPEED_STEER_K * steer_norm * steer_norm;
+    if (speed_scale_steer < SPEED_STEER_MIN)
+        speed_scale_steer = SPEED_STEER_MIN;
+    speed_scale_total = speed_scale_mode * speed_scale_curve * speed_scale_steer;
+    if ((preview_delta_abs >= TRANSITION_BRAKE_DPREVIEW_TH) && (abs_preview >= 2.0f))
+    {
+        speed_scale_total *= TRANSITION_BRAKE_KEEP;
+    }
+    if ((abs_preview >= HARD_BRAKE_PREVIEW_TH) && ((preview_delta_abs >= HARD_BRAKE_DPREVIEW_TH) || (curve_score_rise >= HARD_BRAKE_SCORE_RISE_TH)))
+    {
+        hard_brake_cnt = HARD_BRAKE_HOLD_CYCLES;
+        if (curve_hold_cnt < HARD_BRAKE_CURVE_HOLD_CYCLES)
+            curve_hold_cnt = HARD_BRAKE_CURVE_HOLD_CYCLES;
+    }
+    if (hard_brake_cnt > 0)
+    {
+        speed_scale_total *= HARD_BRAKE_KEEP;
+        hard_brake_cnt--;
+    }
+    speed_scale_total = clamp_f(speed_scale_total, SPEED_SCALE_MIN, SPEED_SCALE_MAX);
+    target_pulses_des = (int)((float)base_pulses * speed_scale_total);
+    target_pulses_min = (int)((float)base_pulses * SPEED_SCALE_MIN);
+    target_pulses_max = (int)((float)base_pulses * SPEED_SCALE_MAX);
+    if (target_pulses_des < target_pulses_min)
+        target_pulses_des = target_pulses_min;
+    if (target_pulses_des > target_pulses_max)
+        target_pulses_des = target_pulses_max;
+    if (target_pulses_ramped <= 1.0f)
+    {
+        target_pulses_ramped = (float)target_pulses_des;
+    }
+    target_step_up = TARGET_STEP_UP_STRAIGHT + (TARGET_STEP_UP_SHARP - TARGET_STEP_UP_STRAIGHT) * mode_intensity;
+    if ((float)target_pulses_des > target_pulses_ramped + target_step_up)
+    {
+        target_pulses_ramped += target_step_up;
+    }
+    else if ((float)target_pulses_des < target_pulses_ramped - TARGET_STEP_DOWN)
+    {
+        target_pulses_ramped -= TARGET_STEP_DOWN;
+    }
+    else
+    {
+        target_pulses_ramped = (float)target_pulses_des;
+    }
+    target_pulses = (int)(target_pulses_ramped + 0.5f);
+    if (target_pulses < target_pulses_min)
+        target_pulses = target_pulses_min;
+    if (target_pulses > target_pulses_max)
+        target_pulses = target_pulses_max;
+    // 8) 后轮差速
+    diff_k = DIFF_K_BASE + DIFF_K_GAIN * mode_intensity;
+    steer_for_diff = steer_out;
+    diff_gamma = diff_gamma_from_steer(abs_steer);
+    if (abs_steer <= DIFF_STEER_DEADBAND)
+    {
+        steer_for_diff = 0.0f;
+        diff_gamma = 0.0f;
+    }
+    // 单一路径差速：target_pulses * Ackermann_gamma * diff_k
+    // 方向由舵机方向决定，避免前后两套差速公式互相覆盖
+    diff_cmd = (float)target_pulses * diff_gamma * diff_k;
+    if (steer_for_diff > 0.0f)
+        diff_cmd *= RIGHT_TURN_DIFF_MUL;
+    else if (steer_for_diff < 0.0f)
+        diff_cmd = -diff_cmd * LEFT_TURN_DIFF_MUL;
+    else
+        diff_cmd = 0.0f;
+    diff_filtered = diff_filtered * (1.0f - DIFF_FILTER_ALPHA) + diff_cmd * DIFF_FILTER_ALPHA;
+    diff_step_limit = DIFF_STEP_STRAIGHT + (DIFF_STEP_SHARP - DIFF_STEP_STRAIGHT) * mode_intensity;
+    if (steer_for_diff > 0.0f)
+        diff_step_limit *= DIFF_STEP_RIGHT_MUL;
+    diff_delta = diff_filtered - diff_limited;
+    if (diff_delta > diff_step_limit)
+        diff_limited += diff_step_limit;
+    else if (diff_delta < -diff_step_limit)
+        diff_limited -= diff_step_limit;
+    else
+        diff_limited = diff_filtered;
+    if (diff_limited >= 0.0f)
+        diff_speed = (int)(diff_limited + 0.5f);
+    else
+        diff_speed = (int)(diff_limited - 0.5f);
+    diff_cap = (int)((float)target_pulses * DIFF_CAP_RATIO);
+    if (diff_cap < DIFF_CAP_MIN)
+        diff_cap = DIFF_CAP_MIN;
+    if (diff_speed > diff_cap)
+        diff_speed = diff_cap;
+    else if (diff_speed < -diff_cap)
+        diff_speed = -diff_cap;
+    left_target_pulses = target_pulses + diff_speed;
+    right_target_pulses = target_pulses - diff_speed;
+    // 急弯内轮最低速度保护（滞回）
+    if (!inner_min_enable)
+    {
+        if ((abs_steer >= DIFF_INNER_MIN_STEER_ON) &&
+            (curve_score >= DIFF_INNER_MIN_SCORE_ON))
+        {
+            inner_min_enable = 1;
+        }
+    }
+    else
+    {
+        if ((abs_steer <= DIFF_INNER_MIN_STEER_OFF) ||
+            (curve_score <= DIFF_INNER_MIN_SCORE_OFF))
+        {
+            inner_min_enable = 0;
+        }
+    }
+    if (inner_min_enable)
+    {
+        inner_min_pulses = (int)((float)base_pulses * DIFF_INNER_MIN_RATIO);
+        if (inner_min_pulses < 1)
+            inner_min_pulses = 1;
+        if (left_target_pulses < right_target_pulses)
+        {
+            if (left_target_pulses < inner_min_pulses)
+                left_target_pulses = inner_min_pulses;
+        }
+        else
+        {
+            if (right_target_pulses < inner_min_pulses)
+                right_target_pulses = inner_min_pulses;
+        }
+    }
+    // 9) 电机闭环
+    encoder_update();
+    left_motor_speed_pid_calc(left_target_pulses, left_speed);
+    right_motor_speed_pid_calc(right_target_pulses, right_speed);
+    set_motor_speed((int)left_motor_speedpid.output, (int)right_motor_speedpid.output);
+    // 保留低频调试触发（不做在线调参）
+    loop_cnt++;
+    if (loop_cnt >= 5)
+    {
+        loop_cnt = 0;
+        print_flag = 1;
+    }
+    // g_offset_ctrl_x10 = (int16)(offset_ctrl * 10.0f);   // 放大10倍，避免串口发float
+}
+
+
+
+
+

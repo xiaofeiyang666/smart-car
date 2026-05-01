@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  main                                                               22/04/26  16:39:20  PAGE 1   
+C251 COMPILER V5.60.0,  main                                                               01/05/26  14:22:09  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE main
@@ -19,129 +19,93 @@ stmt  level    source
     7          #include "encoder.h"
     8          #include "pid.h"
     9          #include "brushless.h"
-   10          #include <string.h>
-   11          #define WIFI_SSID_TEST "Car"
-   12          #define WIFI_PASSWORD_TEST "431431431"
-   13          
-   14          //void main(void)
-   15          //{
-   16          //    char debug_str[64];
-   17          //    clock_init(SYSTEM_CLOCK_96M);
-   18          //    debug_init();
-   19          
-   20          //    //初始化
-   21          //    motor_init();
-   22          //    encoder_init();
-   23          //    servo_init();   // 初始化舵机 (中值归位)
-   24          //    control_init(); // 初始化 PID 参数
-   25          //    fan_init();
-   26          //    ips200_init();
-   27          
-   28          //    // 开启定时器中断
-   29          //    pit_ms_init(TIM0_PIT, 20, control_loop);
-   30          //    EA = 1;
-   31          
-   32          //    // 通信和摄像头初始化
-   33          ////    while (wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST))
-   34          ////    {
-   35          ////        system_delay_ms(100);
-   36          ////    }
-   37          
-   38          ////    if (1 != WIFI_SPI_AUTO_CONNECT)
-   39          ////    {
-   40          ////        while (wifi_spi_socket_connect("TCP", WIFI_SPI_TARGET_IP, WIFI_SPI_TARGET_PORT, WIFI_SPI_LOCA
-             -L_PORT))
-   41          ////        {
-   42          ////            system_delay_ms(100);
-   43          ////        }
-   44          ////    }
-   45          
-   46          //    while (mt9v03x_init())
-   47          //    {
-   48          //        system_delay_ms(100);
-   49          //    }
-   50          
-   51          //    if (wireless_uart_init())
-   52          //    {
-   53          //    }
-   54          //    //wireless_uart_send_string("System Init OK!\r\n");
-   55          
-C251 COMPILER V5.60.0,  main                                                               22/04/26  16:39:20  PAGE 2   
+   10          
+   11          // 串口调试开关：0=关闭（提升性能），1=开启（输出fps/off/pre）
+   12          #define UART_DEBUG_PRINT_ENABLE    1
+   13          // 开启调试时的分频：每N次print_flag输出一次，减小串口阻塞
+   14          #define UART_DEBUG_PRINT_DIV       5
+   15          
+   16          void main(void)
+   17          {
+   18   1      #if UART_DEBUG_PRINT_ENABLE
+   19   1          char debug_str[64];
+   20   1          uint8 uart_dbg_div = 0;
+   21   1      #endif
+   22   1      
+   23   1          clock_init(SYSTEM_CLOCK_96M);
+   24   1          debug_init();
+   25   1      
+   26   1          // 硬件初始化
+   27   1          motor_init();
+   28   1          encoder_init();
+   29   1          servo_init();
+   30   1          control_init();
+   31   1          fan_init();
+   32   1          set_fan_speed(800, 800);
+   33   1          imu660ra_init();
+   34   1      
+   35   1      #if UART_DEBUG_PRINT_ENABLE
+   36   1          // 开启无线串口，便于实时查看fps和偏差
+   37   1          wireless_uart_init();
+   38   1      #endif
+   39   1      
+   40   1          // 摄像头初始化
+   41   1          camara_init();
+   42   1      
+   43   1          // 控制环20ms
+   44   1          pit_ms_init(TIM0_PIT, 20, control_loop);
+   45   1          // 1ms节拍用于统计current_fps
+   46   1          pit_ms_init(TIM1_PIT, 1, my_fps_timer_callback);
+   47   1      
+   48   1          EA = 1;
+   49   1      
+   50   1          while (1)
+   51   1          {
+   52   2              camara_task();
+   53   2      
+   54   2              // print_flag大约100ms触发一次
+   55   2              if (print_flag)
+   56   2              {
+C251 COMPILER V5.60.0,  main                                                               01/05/26  14:22:09  PAGE 2   
 
-   56          //    while (1)
-   57          //    {
-   58          //        camara_task();
-   59          
-   60          //        if (print_flag)
-   61          //        {
-   62          //            print_flag = 0;
-   63          //            // 打印：设定速度、当前速度、PID算出的PWM占空比
-   64          //            sprintf(debug_str, "%d,%d,%d\n", target_speed_base, left_speed, right_speed);
-   65          //            wireless_uart_send_string(debug_str);
-   66          //        }
-   67          //        //set_motor_speed(10,10);
-   68          //    }
-   69          //}
-   70          
-   71          void main(void)
-   72          {
-   73   1          char debug_str[64];
-   74   1          clock_init(SYSTEM_CLOCK_96M);
-   75   1          debug_init();
-   76   1      
-   77   1          // 2. 依次初始化各个硬件模块
-   78   1          motor_init();
-   79   1          encoder_init();
-   80   1          servo_init();   
-   81   1          control_init(); 
-   82   1          fan_init();
-   83   1          imu660ra_init();
-   84   1          //wireless_uart_init(); //2026.4.18注释这里
-   85   1          
-   86   1          camara_init(); 
-   87   1      
-   88   1          // 开启定时器中断 (20ms周期)
-   89   1          pit_ms_init(TIM0_PIT, 20, control_loop);
-   90   1          EA = 1;
-   91   1      
-   92   1          while (1)
-   93   1          {
-   94   2              // 3. 循环执行图像处理任务
-   95   2              camara_task();
-   96   2              set_fan_speed(800,800);
-   97   2              if (print_flag)
-   98   2              {
-   99   3                  print_flag = 0;
-  100   3                  //sprintf(debug_str, "%d,%d,%d,%d\n", left_target_pulses,right_target_pulses, left_speed, right_spe
-             -ed);//2026.4.18注释这里
-  101   3                  //wireless_uart_send_string(debug_str);//2026.4.18注释这里
-  102   3              }
-  103   2          }
-  104   1      }
-*** WARNING C47 IN LINE 73 OF ..\user\main.c: 'debug_str': unreferenced local variable
+   57   3                  print_flag = 0;
+   58   3      
+   59   3      #if UART_DEBUG_PRINT_ENABLE
+   60   3                  uart_dbg_div++;
+   61   3                  if (uart_dbg_div >= UART_DEBUG_PRINT_DIV)
+   62   3                  {
+   63   4                      uart_dbg_div = 0;
+   64   4                      sprintf(debug_str, "fps=%u,off=%d,pre=%d\r\n", current_fps, camera_bias_raw, camera_previ
+             -ew_raw);
+   65   4                      wireless_uart_send_string(debug_str);
+   66   4                  }
+   67   3      #endif
+   68   3              }
+   69   2          }
+   70   1      }
+   71          
+   72          
 
 
 Module Information          Static   Overlayable
 ------------------------------------------------
   code size            =    ------     ------
-  ecode size           =       182     ------
+  ecode size           =       337     ------
   data size            =    ------     ------
   idata size           =    ------     ------
   pdata size           =    ------     ------
-  xdata size           =    ------     ------
+  xdata size           =        65     ------
   xdata-const size     =    ------     ------
   edata size           =    ------     ------
   bit size             =    ------     ------
   ebit size            =    ------     ------
   bitaddressable size  =    ------     ------
   ebitaddressable size =    ------     ------
-C251 COMPILER V5.60.0,  main                                                               22/04/26  16:39:20  PAGE 3   
-
   far data size        =    ------     ------
   huge data size       =    ------     ------
   const size           =    ------     ------
-  hconst size          =         2     ------
+  hconst size          =        25     ------
 End of Module Information.
 
 
-C251 COMPILATION COMPLETE.  1 WARNING(S),  0 ERROR(S)
+C251 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

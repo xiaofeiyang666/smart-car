@@ -9,8 +9,8 @@
 
 // 舵机机械限位 (需要上车实际调试)
 #define SERVO_CENTER            (90.0f)           // 中值角度
-#define SERVO_L_MAX             (77.0f)           // 左打死最大角度
-#define SERVO_R_MAX             (103.0f)          // 右打死最大角度
+#define SERVO_L_MAX             (74.0f)           // 左打死最大角度
+#define SERVO_R_MAX             (100.0f)          // 右打死最大角度
 
 // 占空比计算公式宏
 #define SERVO_DUTY(angle)       ((float)PWM_DUTY_MAX / (1000.0f / (float)SERVO_FREQ) * (0.5f + (float)(angle) / 90.0f))

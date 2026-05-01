@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  usb_req_class                                                      22/04/26  16:39:18  PAGE 1   
+C251 COMPILER V5.60.0,  usb_req_class                                                      01/05/26  14:22:06  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE usb_req_class
@@ -66,7 +66,7 @@ stmt  level    source
    53   1      }
    54          
    55          void usb_get_line_coding()
-C251 COMPILER V5.60.0,  usb_req_class                                                      22/04/26  16:39:18  PAGE 2   
+C251 COMPILER V5.60.0,  usb_req_class                                                      01/05/26  14:22:06  PAGE 2   
 
    56          {
    57   1          if ((DeviceState != DEVSTATE_CONFIGURED) ||

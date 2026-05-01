@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 1   
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE control
@@ -18,898 +18,699 @@ stmt  level    source
     6          #include "camera.h"
     7          #include "brushless.h"
     8          
-    9          // ÀŸ∂»”≥…‰£∫Ω´ÀŸ∂»÷∏¡Ó£®0~90£©ªªÀ„Œ™±‡¬Î∆˜ƒø±Í¬ˆ≥Â
-   10          #define MAX_SPEED_PULSES 4000
-   11          
-   12          #define BASE_SPEED_MATCH_GAIN          1.06f            // ª˘¥°ÀŸ∂»±Í∂®±∂¬ £ª±’ª∑15±»÷±«˝15¬˝‘Ú‘ˆ¥Û£¨≥ÂÕ‰
-             -‘Úºı–°
-   13          // ===================== µ˜≤Œ◊‹Àµ√˜ =====================
-   14          // 1) œ»πÿ÷±µ¿º”ÀŸ£®STRAIGHT_ACCEL_ENABLE=0£©∞—≥µµ˜Œ»£¨‘Ÿø™º”ÀŸ°£
-   15          // 2) œ»µ˜Œ»Ã¨◊™œÚ£®÷±œﬂ≤ª∂∂°¢Õ‰µ¿≤ªÀ¶£©£¨‘ŸÃ· target_speed_base°£
-   16          // 3) √ø¥Œ÷ª∏ƒ“ª◊È≤Œ ˝£¨Ω®“È√ø¥Œ∏ƒ∂Ø 5%~10%°£
+    9          // ===================== ÀŸ∂»”≥…‰ =====================
+   10          #define MAX_SPEED_PULSES                 4000
+   11          #define BASE_SPEED_MATCH_GAIN            1.05f   // »√target_speed_base”Î µ≥µÀŸ∂»∏¸Ω”Ω¸
+   12          
+   13          // ===================== ∂Êª˙øÿ÷∆≤Œ ˝ =====================
+   14          #define SERVO_OUT_LIMIT_LEFT             (SERVO_CENTER - SERVO_L_MAX)
+   15          #define SERVO_OUT_LIMIT_RIGHT            (SERVO_R_MAX - SERVO_CENTER)
+   16          #define SERVO_DEADBAND_PIX               1.2f
    17          
-   18          // -------------------------  ”æıÃÿ’˜”Î¬À≤® -------------------------
-   19          #define PREVIEW_Y_NEAR                  (MT9V03X_H - 14) // Ω¸«∞’∞––£ªΩ¯Õ‰¬˝ø……œ“∆(ºı–°)£¨÷±œﬂ∂∂∂Øø…œ¬“∆(
-             -‘ˆ¥Û)
-   20          #define PREVIEW_Y_FAR                   30               // ‘∂«∞’∞––£ªΩ¯Õ‰ÕÌø…ºı–°£¨‘∂¥¶‘Î…˘¥Ûø…‘ˆ¥Û
-   21          
-   22          #define OFFSET_LPF_ALPHA_STRAIGHT       0.25f            // ÷±µ¿∆´≤ÓµÕÕ®£ª÷±œﬂ–ﬁ’˝¬˝‘ˆ¥Û£¨÷±œﬂ∂∂∂Ø¥Ûºı–°
-   23          #define OFFSET_LPF_ALPHA_CURVE          0.65f            // Õ‰µ¿∆´≤ÓµÕÕ®£ª»ÎÕ‰¬˝‘ˆ¥Û£¨Õ‰÷–∂∂∂Øºı–°
-   24          #define PREVIEW_LPF_ALPHA               0.36f            // «∞’∞µÕÕ®£ª≥ÂÕ‰ø…‘ˆ¥Û£¨ŒÛ¥•∑¢ø…ºı–°
-   25          #define GYRO_LPF_ALPHA                  0.30f            // Õ”¬›µÕÕ®£ª‘Î…˘¥Ûºı–°£¨÷Õ∫Û¥Û‘ˆ¥Û
-   26          
-   27          // ------------------------- ∂Êª˙ª˘¥°≤Œ ˝ -------------------------
-   28          #define SERVO_DEADBAND_PIX              6                // ∆´≤ÓÀ¿«¯£ª÷±œﬂ∂∂∂Ø¥Û‘ˆ¥Û£¨÷±œﬂ≤ª–ﬁ’˝ºı–°
-   29          #define SERVO_OUT_LIMIT                 20.0f            // »Ìº˛∂ÊΩ«œﬁ∑˘£ª◊™≤ªπ˝Õ‰‘ˆ¥Û£¨ª˙–µ∏……Ê∑Áœ’ºı–°
-   30          #define RIGHT_TURN_STEER_MUL            1.08f            // ”“◊™¥ÚΩ«≤π≥•±∂ ˝£ª”“¥ÛÕ‰¥ÚΩ«≤ª◊„‘Ú‘ˆ¥Û£¨”“◊™π
-             -˝≥Â‘Úºı–°
-   31          #define LEFT_TURN_STEER_MUL             1.08f            // ◊Û◊™¥ÚΩ«≤π≥•±∂ ˝£ªÕ®≥£±£≥÷ 1.00
-   32          
-   33          #define SERVO_RATE_STRAIGHT             0.55f            // ÷±µ¿√ø÷‹∆⁄◊Ó¥Û¥ÚΩ«±‰ªØ£ª÷±œﬂ–ﬁ’˝¬˝‘ˆ¥Û£¨÷±œﬂ≥
-             -È∂Øºı–°
-   34          #define SERVO_RATE_ENTRY                4.60f            // »ÎÕ‰¥ÚΩ«ÀŸ¬ £ª»ÎÕ‰ÕÌ‘ˆ¥Û£¨»ÎÕ‰π˝√Õºı–°
-   35          #define SERVO_RATE_APEX                 5.60f            // Õ‰÷–¥ÚΩ«ÀŸ¬ £ª¥ÛÕ‰Ã˘Õ‚œﬂ‘ˆ¥Û£¨Õ‰÷–∂∂∂Øºı–°
-   36          #define SERVO_RATE_EXIT                 3.20f            // ≥ˆÕ‰¥ÚΩ«ÀŸ¬ £ªSÕ‰∂˛Õ‰œÏ”¶¬˝‘ˆ¥Û
-   37          #define SERVO_RATE_RECOVERY             5.20f            // æ»≥µ¥ÚΩ«ÀŸ¬ £ª≥Âœﬂæ»≤ªªÿ‘ˆ¥Û£¨≥È∂Øπ˝√Õºı–°
-   38          #define SERVO_SOFT_DEADBAND_PIX         3.2f             // »ÌÀ¿«¯œÒÀÿ£ª–°∆´≤Ó∂∂∂Ø¥Û‘ˆ¥Û£¨÷±œﬂ≤ªªÿ’˝ºı–°
-   39          #define STRAIGHT_SMALL_ERR_TH            5.0f             // ÷±µ¿–°ŒÛ≤Ó„–÷µ£ª–°∑∂Œß»‘∂∂∂Ø‘ˆ¥Û
-   40          #define STRAIGHT_SMALL_PREVIEW_TH        2.2f             // ÷±µ¿–°ŒÛ≤Ó«∞’∞„–÷µ£ª‘Î…˘¥•∑¢∂‡ºı–°
-   41          #define SERVO_RATE_STRAIGHT_SMALL        0.32f            // ÷±µ¿–°ŒÛ≤Ó«¯ÀŸ¬ £ª÷±œﬂ≥È∂Ø¥Ûºı–°
-   42          #define STEER_GAIN_STRAIGHT_SMALL_MUL    0.42f            // ÷±µ¿–°ŒÛ≤Ó«¯±»¿˝£ª«·Œ¢∆´“∆–ﬁ’˝π˝√Õºı–°
-   43          #define STEER_GYRO_STRAIGHT_SMALL_MUL    1.80f            // ÷±µ¿–°ŒÛ≤Ó«¯Õ”¬›◊Ëƒ·£ª¿¥ªÿ∞⁄∂Ø¥Û‘ˆ¥Û
-   44          #define STEER_FF_STRAIGHT_SMALL_MUL      0.05f            // ÷±µ¿–°ŒÛ≤Ó«¯«∞¿°£ª÷±œﬂ‘Î…˘¥ÚΩ«¥Ûºı–°
-   45          #define STEER_RAW_LPF_ALPHA_STRAIGHT     0.22f            // ÷±µ¿◊™œÚ ‰≥ˆµÕÕ®£ª÷±œﬂ∂∂∂Ø¥Ûºı–°
-   46          #define STEER_RAW_LPF_ALPHA_CURVE        0.58f            // Õ‰µ¿◊™œÚ ‰≥ˆµÕÕ®£ª»ÎÕ‰≥Ÿ÷Õ¥Û‘ˆ¥Û
+   18          #define ERR_SMALL_TH                     3.5f
+   19          #define ERR_MID_TH                       10.0f
+   20          
+   21          #define KP_MUL_SMALL                     0.58f
+   22          #define KP_MUL_MID                       0.92f
+   23          #define KP_MUL_LARGE                     1.20f
+   24          
+   25          #define KD_MUL_SMALL                     1.26f
+   26          #define KD_MUL_MID                       1.00f
+   27          #define KD_MUL_LARGE                     0.86f
+   28          
+   29          #define STEP_SMALL                       1.10f
+   30          #define STEP_MID                         3.20f
+   31          #define STEP_LARGE                       7.60f
+   32          #define STEP_MIN                         0.60f
+   33          
+   34          #define STEP_REVERSE_DPV_TH              1.00f
+   35          #define STEP_REVERSE_MUL                 1.42f
+   36          
+   37          #define RIGHT_TURN_STEER_MUL             1.18f   // ”“◊™≤ª◊„æÕº”£¨”“◊™π˝º§æÕºı
+   38          #define LEFT_TURN_STEER_MUL              1.00f
+   39          
+   40          #define OFFSET_LPF_ALPHA_STRAIGHT        0.30f
+   41          #define OFFSET_LPF_ALPHA_CURVE           0.62f
+   42          #define PREVIEW_LPF_ALPHA                0.58f
+   43          #define GYRO_LPF_ALPHA                   0.30f
+   44          #define ERRD_LPF_ALPHA                   0.40f
+   45          #define STEER_RAW_ALPHA_STRAIGHT         0.22f
+   46          #define STEER_RAW_ALPHA_CURVE            0.78f
    47          
-   48          // ◊¥Ã¨‘ˆ“Êµ˜∂»£®‘⁄ servo_kp / servo_kd / servo_kff ª˘¥°…œ≥À“‘œ¬¡–±∂ ˝£©
-   49          #define STEER_GAIN_STRAIGHT_MUL         0.60f            // ÷±µ¿±»¿˝±∂ ˝£ª÷±µ¿∂∂∂Ø¥Ûºı–°
-   50          #define STEER_GAIN_ENTRY_MUL            1.15f            // »ÎÕ‰±»¿˝±∂ ˝£ª»ÎÕ‰ÕÌ‘ˆ¥Û
-   51          #define STEER_GAIN_APEX_MUL             1.35f            // Õ‰÷–±»¿˝±∂ ˝£ªÃ˘Õ‚œﬂ‘ˆ¥Û£¨∞⁄∂Ø¥Ûºı–°
-   52          #define STEER_GAIN_EXIT_MUL             0.98f            // ≥ˆÕ‰±»¿˝±∂ ˝£ª≥ˆÕ‰Õ‚≈◊‘ˆ¥Û£¨≥ˆÕ‰∂∂∂Øºı–°
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 2   
-
-   53          #define STEER_GAIN_RECOVERY_MUL         1.15f            // æ»≥µ±»¿˝±∂ ˝£ªæ»≥µ≤ªπª‘ˆ¥Û
+   48          #define STEER_FF_DPREVIEW_K              0.26f
+   49          #define STEER_FF_LIMIT_BASE              2.2f
+   50          #define STEER_FF_LIMIT_CURVE_ADD         1.4f
+   51          #define STEER_FF_SUPPRESS_ERR_TH         4.2f
+   52          #define STEER_FF_SUPPRESS_PREVIEW_TH     3.2f
+   53          #define STEER_FF_SUPPRESS_MUL            0.35f
    54          
-   55          #define STEER_GYRO_STRAIGHT_MUL         1.45f            // ÷±µ¿Õ”¬›◊Ëƒ·±∂ ˝£ª÷±œﬂ∞⁄∂Ø¥Û‘ˆ¥Û
-   56          #define STEER_GYRO_ENTRY_MUL            1.05f            // »ÎÕ‰Õ”¬›◊Ëƒ·±∂ ˝
-   57          #define STEER_GYRO_APEX_MUL             1.00f            // Õ‰÷–Õ”¬›◊Ëƒ·±∂ ˝£ªÕ‰÷–≥Ÿ∂€ø…ºı–°
-   58          #define STEER_GYRO_EXIT_MUL             1.15f            // ≥ˆÕ‰Õ”¬›◊Ëƒ·±∂ ˝£ª≥ˆÕ‰¿¥ªÿªŒ‘ˆ¥Û
-   59          #define STEER_GYRO_RECOVERY_MUL         1.08f            // æ»≥µÕ”¬›◊Ëƒ·±∂ ˝
-   60          
-   61          #define STEER_FF_STRAIGHT_MUL           0.28f            // ÷±µ¿«∞¿°±∂ ˝£ª÷±µ¿ŒÛ¥ÚΩ«ø…ºı–°
-   62          #define STEER_FF_ENTRY_MUL              1.14f            // »ÎÕ‰«∞¿°±∂ ˝£ª»ÎÕ‰¬˝ø…‘ˆ¥Û
-   63          #define STEER_FF_APEX_MUL               1.35f            // Õ‰÷–«∞¿°±∂ ˝£ª¥ÛÕ‰Ã˘Õ‚œﬂø…‘ˆ¥Û
-   64          #define STEER_FF_EXIT_MUL               0.90f            // ≥ˆÕ‰«∞¿°±∂ ˝£ª≥ˆÕ‰∂∂∂Øø…ºı–°
-   65          #define STEER_FF_RECOVERY_MUL           1.05f            // æ»≥µ«∞¿°±∂ ˝
-   66          #define PREVIEW_FF_LIMIT                7.8f             // «∞¿°œﬁ∑˘£ªÕ‰µ¿≤ªπª◊™‘ˆ¥Û£¨◊™œÚ≥Âª˜¥Ûºı–°
-   67          #define CURVE_OUTSIDE_PREVIEW_TH        3.4f             // Õ‚∆Ø≈–∂®«∞’∞„–÷µ£ªÕ‚∆ØŒÛ≈–∂‡ø…‘ˆ¥Û£¨◊•Õ‚œﬂ≤ªª
-             -ÿø…ºı–°
-   68          #define CURVE_CENTER_ERR_TH             2.4f             // Õ‚∆Ø≈–∂®∆´≤Ó„–÷µ£ªÕ‚∆Øªÿ÷–¬˝ø…ºı–°£¨÷±œﬂŒÛ¥•∑
-             -¢ø…‘ˆ¥Û
-   69          #define CURVE_OUTSIDE_FF_SUPPRESS       0.12f            // Õ‚∆Ø ±«∞¿°“÷÷∆œµ ˝£ª»‘Ã˘Õ‚œﬂø…ºı–°£¨◊™œÚ±‰∂€ø
-             -…‘ˆ¥Û
-   70          #define CURVE_OUTSIDE_PULL_K            0.36f            // Õ‚∆Øªÿ÷–¿≠¡¶œµ ˝£ªÕ‚∆Ø¿≠≤ªªÿ‘ˆ¥Û£¨ªÿ÷–≥È∂Øºı–
-             -°
-   71          #define CURVE_OUTSIDE_RATE_MUL          1.55f            // Õ‚∆Ø ±∂Êª˙ÀŸ¬ ∑≈¥Û£ªªÿ÷–¬˝‘ˆ¥Û£¨∞⁄∂Ø¥Ûºı–°
-   72          #define CURVE_OUTSIDE_SPEED_KEEP        0.82f            // Õ‚∆Ø ±ÀŸ∂»±£≥÷£ªÕ‚∆Ø—œ÷ÿºı–°£¨≥ˆÕ‰Õœ¬˝‘ˆ¥Û
-   73          
-   74          #define REVERSE_TURN_PREVIEW_TH         2.6f             // SÕ‰ªªœÚ≈–∂®„–÷µ£ª∂˛Õ‰Ω¯≤ª»•ø…ºı–°£¨ŒÛ¥•∑¢ø…‘ˆ
-             -¥Û
-   75          #define REVERSE_TURN_HOLD_CYCLES        12               // SÕ‰ªªœÚ∏®÷˙≥÷–¯÷‹∆⁄£ªªªœÚ≤ªº∞ ±ø…‘ˆ¥Û
-   76          #define REVERSE_TURN_RATE_MUL           1.25f            // SÕ‰ªªœÚ ±¥ÚΩ«ÀŸ¬ ±∂ ˝£ªªªœÚ¬˝‘ˆ¥Û£¨≥È∂Ø¥Ûºı–°
-   77          #define REVERSE_TURN_FF_MUL             1.10f            // SÕ‰ªªœÚ ±«∞¿°±∂ ˝£ª∂˛Õ‰Ã˘Õ‚œﬂ‘ˆ¥Û£¨π˝≥Âºı–°
-   78          #define REVERSE_TURN_SPEED_KEEP         0.52f            // SÕ‰ªªœÚ∂Ã ±ÀŸ∂»±£≥÷£ª∑…≥ˆºı–°£¨µÙÀŸπ˝∂‡‘ˆ¥Û
-   79          
-   80          // ------------------------- ◊¥Ã¨ª˙„–÷µ -------------------------
-   81          #define STATE_STRAIGHT_PREVIEW_TH       3.0f             // ÷±µ¿≈–∂®«∞’∞„–÷µ£ªÃ´√Ù∏–‘ˆ¥Û£¨÷±µ¿ ∂±¬˝ºı–°
-   82          #define STATE_STRAIGHT_OFFSET_TH        2.4f             // ÷±µ¿≈–∂®∆´≤Ó„–÷µ£ª÷±µ¿ŒÛ≈–Õ‰µ¿‘ˆ¥Û
-   83          #define STATE_STRAIGHT_GYRO_TH          40.0f            // ÷±µ¿≈–∂®Ω«ÀŸ∂»„–÷µ£ª≥µ…ÌªŒ∂Ø»‘≈–÷±µ¿‘Úºı–°
-   84          
-   85          #define STATE_ENTRY_PREVIEW_TH          3.1f             // »ÎÕ‰≈–∂®«∞’∞„–÷µ£ª»ÎÕ‰ÕÌºı–°£¨ŒÛ¥•∑¢‘ˆ¥Û
-   86          #define STATE_ENTRY_DPREVIEW_TH         0.24f            // »ÎÕ‰±‰ªØ¬ „–÷µ£ª≥§÷±≥ÂÕ‰ºı–°£¨ŒÛ¥•∑¢‘ˆ¥Û
-   87          #define STATE_STRAIGHT_PREVIEW_KEEP_TH  3.4f             // “—‘⁄÷±µ¿ ±µƒ±£≥÷„–÷µ£ª÷±µ¿ŒÛ«–Õ‰‘ˆ¥Û
-   88          #define STATE_STRAIGHT_OFFSET_KEEP_TH   3.0f             // “—‘⁄÷±µ¿ ±µƒ∆´≤Ó±£≥÷„–÷µ
-   89          #define STATE_STRAIGHT_GYRO_KEEP_TH     55.0f            // “—‘⁄÷±µ¿ ±µƒΩ«ÀŸ±£≥÷„–÷µ
-   90          #define STATE_STRAIGHT_PREVIEW_BACK_TH  2.6f             // ¥”Õ‰µ¿ªÿ÷±µ¿„–÷µ£ªªÿ÷±µ¿Ã´¬˝‘ˆ¥Û
-   91          #define STATE_STRAIGHT_OFFSET_BACK_TH   2.0f             // ¥”Õ‰µ¿ªÿ÷±µ¿∆´≤Ó„–÷µ
-   92          #define STATE_STRAIGHT_GYRO_BACK_TH     35.0f            // ¥”Õ‰µ¿ªÿ÷±µ¿Ω«ÀŸ„–÷µ
-   93          #define STATE_ENTRY_PREVIEW_ON_TH       3.5f             // ¥”÷±µ¿Ω¯»ÎÕ‰µ¿„–÷µ£ª÷±œﬂŒÛ»ÎÕ‰‘ˆ¥Û
-   94          #define STATE_ENTRY_DPREVIEW_ON_TH      0.30f            // ¥”÷±µ¿Ω¯»ÎÕ‰µ¿±‰ªØ¬ „–÷µ
-   95          #define STATE_ENTRY_PREVIEW_OFF_TH      3.0f             // ∑«÷±µ¿œ¬±£≥÷»ÎÕ‰≈–∂®„–÷µ£ªSÕ‰œŒΩ”¬˝ºı–°
-   96          #define STATE_ENTRY_DPREVIEW_OFF_TH     0.20f            // ∑«÷±µ¿œ¬±£≥÷»ÎÕ‰±‰ªØ¬ „–÷µ
-   97          #define STATE_APEX_PREVIEW_TH           5.8f             // Õ‰–ƒ≈–∂®«∞’∞„–÷µ£ª«–µΩÕ‰÷––ƒÃ´ÕÌºı–°
-   98          
-   99          #define STATE_EXIT_PREVIEW_TH           4.6f             // ≥ˆÕ‰≈–∂®«∞’∞„–÷µ£ª≥ˆÕ‰¬˝‘ˆ¥Û£¨π˝‘Á≥ˆÕ‰ºı–°
-  100          #define STATE_EXIT_OFFSET_TH            4.0f             // ≥ˆÕ‰≈–∂®∆´≤Ó„–÷µ£ª≥ˆÕ‰ªÿ’˝¬˝‘ˆ¥Û£¨≥ˆÕ‰ªŒ∂Øºı–
-             -°
-  101          
-  102          #define STATE_RECOVERY_OFFSET_TH        17.0f            // æ»≥µ∆´≤Ó„–÷µ£ªæ»≥µÃ´ÕÌºı–°£¨ŒÛ¥•∑¢‘ˆ¥Û
-  103          
-  104          #define STATE_ENTRY_HOLD_CYCLES         3                // »ÎÕ‰◊Ó∂Ã±£≥÷÷‹∆⁄
-  105          #define STATE_APEX_HOLD_CYCLES          4                // Õ‰–ƒ◊Ó∂Ã±£≥÷÷‹∆⁄
-  106          #define STATE_EXIT_HOLD_CYCLES          3                // ≥ˆÕ‰◊Ó∂Ã±£≥÷÷‹∆⁄
-  107          #define STATE_RECOVERY_HOLD_CYCLES      8                // æ»≥µ◊Ó∂Ã±£≥÷÷‹∆⁄
-  108          
-  109          // ≥§÷±∫Û∂ÓÕ‚…≤≥µ£∫“÷÷∆°∞≥§÷±≥ÂÕ‰°±
-  110          #define LONG_STRAIGHT_COUNT_TH          12               // ≈–∂®≥§÷±œﬂ÷‹∆⁄ ˝£ª¥•∑¢Ã´∆µ∑±‘ˆ¥Û
-  111          #define LONG_STRAIGHT_BRAKE_CYCLES      24               // »ÎÕ‰∂ÓÕ‚…≤≥µ≥÷–¯÷‹∆⁄£ª≥ÂÕ‰—œ÷ÿ‘ˆ¥Û
-  112          #define LONG_STRAIGHT_ENTRY_KEEP        0.34f            // ≥§÷±»ÎÕ‰∂ÓÕ‚ÀŸ∂»±£≥÷£ª≥ÂÕ‰ºı–°£¨µÙÀŸ∂‡‘ˆ¥Û
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 3   
+   55          // À´PD£∫∫·œÚPD∏∫‘°∞Ã˘÷–œﬂ°±£¨«∞’∞PD∏∫‘°∞Ã·«∞◊™œÚ°±
+   56          #define DUAL_PD_LAT_D_BASE               0.32f  // ∫·œÚD‘ˆ“Êª˘ ˝£®“÷÷∆≥Âπ˝Õ∑£©
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 2   
 
-  113          #define HARD_ENTRY_PREVIEW_RAW_TH       3.0f             // ÷±œﬂƒ©∂À”≤»ÎÕ‰«∞’∞„–÷µ£ª≥ÂÕ‰ºı–°£¨ŒÛ¥•∑¢‘ˆ¥Û
-  114          #define HARD_ENTRY_DPREVIEW_RAW_TH      0.60f            // ÷±œﬂƒ©∂À”≤»ÎÕ‰±‰ªØ¬ „–÷µ£ª≥ÂÕ‰ºı–°£¨ŒÛ¥•∑¢‘ˆ¥
-             -Û
-  115          #define HARD_ENTRY_BRAKE_CYCLES         24               // ”≤»ÎÕ‰÷ÿ…≤≥÷–¯÷‹∆⁄£ª≥ÂÕ‰—œ÷ÿ‘ˆ¥Û
-  116          #define HARD_ENTRY_BRAKE_KEEP           0.28f            // ”≤»ÎÕ‰÷ÿ…≤ÀŸ∂»±£≥÷£ª≥ÂÕ‰ºı–°£¨µÙÀŸ¥Û‘ˆ¥Û
-  117          
-  118          // ------------------------- ÀŸ∂»πÊªÆ -------------------------
-  119          #define SPEED_KEEP_ENTRY                0.42f            // »ÎÕ‰◊¥Ã¨ÀŸ∂»±£≥÷£ª»ÎÕ‰≥Â≥ˆºı–°
-  120          #define SPEED_KEEP_APEX_BASE            0.31f            // Õ‰÷–◊¥Ã¨ª˘¥°ÀŸ∂»±£≥÷£ªÕ‰÷–≤ªŒ»ºı–°
-  121          #define SPEED_KEEP_EXIT                 0.46f            // ≥ˆÕ‰◊¥Ã¨ÀŸ∂»±£≥÷£ª¡¨–¯Õ‰∑…≥ˆºı–°
-  122          #define SPEED_KEEP_RECOVERY             0.38f            // æ»≥µ◊¥Ã¨ÀŸ∂»±£≥÷£ªæ»≥µ≤ª◊°ºı–°
+   57          #define DUAL_PD_LAT_D_CURVE_ADD          0.30f  // Õ‰µ¿ ±∫·œÚD‘ˆ«ø
+   58          #define DUAL_PD_HEAD_P_CURVE_ADD         0.30f  // Õ‰µ¿ ±«∞’∞P‘ˆ«ø
+   59          #define DUAL_PD_HEAD_D_GAIN              0.90f  // «∞’∞D»®÷ÿ£®øÿ÷∆SÕ‰«–ªªÀŸ∂»£©
+   60          #define DUAL_PD_GYRO_D_CURVE_ADD         0.18f  // Õ‰µ¿ ±Õ”¬›◊Ëƒ·‘ˆ«ø
+   61          #define DUAL_PD_EXIT_HEAD_KEEP           0.75f  // ≥ˆÕ‰ ±ΩµµÕ«∞’∞ª∑£¨∑¿÷πªÿ÷±œﬂ∂∂∂Ø
+   62          
+   63          #define SMALL_OSC_DERR_TH                2.2f   // –°ŒÛ≤Ó∏ﬂ∆µ∞⁄∂Ø≈–∂®„–÷µ
+   64          #define SMALL_OSC_KP_MUL                 0.80f
+   65          #define SMALL_OSC_KD_MUL                 1.22f
+   66          #define SMALL_OSC_STEP_MUL               0.68f
+   67          
+   68          // Õ‚∆Ø≈–∂®£∫∆´≤Ó∑ΩœÚ∫ÕÕ‰œÚ“ª÷¬ ±£¨Õ®≥£ «≥µ…Ì—ÿÕ‚œﬂ∆Ø“∆
+   69          #define OUTSIDE_PREVIEW_TH               3.4f
+   70          #define OUTSIDE_ERR_TH                   2.4f
+   71          #define OUTSIDE_FF_SUPPRESS              0.52f
+   72          #define OUTSIDE_PULL_K                   0.24f
+   73          #define OUTSIDE_STEP_MUL                 1.18f
+   74          #define OUTSIDE_SPEED_KEEP               0.88f
+   75          #define OUTSIDE_HOLD_CYCLES              6
+   76          
+   77          // ===================== ÀŸ∂»µ˜∂»≤Œ ˝ =====================
+   78          #define CURVE_SCORE_PREVIEW_K            0.58f
+   79          #define CURVE_SCORE_DPV_K                0.82f
+   80          #define CURVE_SCORE_OFFSET_K             0.12f
+   81          
+   82          #define SPEED_CURVE_K                    1.58f
+   83          #define SPEED_STEER_K                    0.64f
+   84          #define SPEED_CURVE_MIN                  0.34f
+   85          #define SPEED_STEER_MIN                  0.38f
+   86          #define SPEED_SCALE_MIN                  0.24f
+   87          #define SPEED_SCALE_MAX                  1.04f
+   88          #define SPEED_CONF_MIN                   0.82f
+   89          
+   90          #define ENTRY_PREVIEW_TH                 2.8f
+   91          #define ENTRY_DPREVIEW_TH                0.12f
+   92          #define ENTRY_BRAKE_KEEP                 0.84f
+   93          
+   94          #define TRANS_BRAKE_PREVIEW_TH           3.2f
+   95          #define TRANS_BRAKE_DPV_TH               0.20f
+   96          #define TRANS_BRAKE_KEEP                 0.78f
+   97          
+   98          #define HARD_BRAKE_PREVIEW_TH            4.8f
+   99          #define HARD_BRAKE_DPV_TH                0.30f
+  100          #define HARD_BRAKE_KEEP                  0.42f
+  101          #define HARD_BRAKE_HOLD_CYCLES           16
+  102          
+  103          #define EXIT_PREVIEW_TH                  2.8f
+  104          #define EXIT_DPREVIEW_TH                 0.12f
+  105          #define EXIT_STEER_TH                    5.8f
+  106          #define EXIT_RELEASE_BOOST               1.03f
+  107          
+  108          #define TARGET_STEP_UP_STRAIGHT          20.0f
+  109          #define TARGET_STEP_UP_CURVE_MIN         6.0f
+  110          #define TARGET_STEP_DOWN                 360.0f
+  111          
+  112          // ===================== ∫Û¬÷≤ÓÀŸ≤Œ ˝ =====================
+  113          #define DIFF_STEER_DEADBAND              4.0f
+  114          #define DIFF_GAIN_BASE                   0.86f
+  115          #define DIFF_GAIN_CURVE_ADD              0.30f
+  116          #define DIFF_RIGHT_MUL                   1.16f
+  117          #define DIFF_LEFT_MUL                    1.00f
+  118          #define DIFF_OUTSIDE_MUL                 1.16f
+  119          
+  120          #define DIFF_FILTER_ALPHA                0.22f
+  121          #define DIFF_STEP_BASE                   12.0f
+  122          #define DIFF_STEP_CURVE_ADD              8.0f
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 3   
+
   123          
-  124          #define SPEED_CURVE_PREVIEW_SCALE       7.0f             // «∞’∞πÈ“ªªØ≥ﬂ∂»£ªÕ‰µ¿ºıÀŸÃ´ÕÌºı–°£¨Ã´‘Á‘ˆ¥Û
-  125          #define SPEED_CURVE_K                   3.20f            // «˙¬ ΩµÀŸ«ø∂»£ªÕ‰µ¿π˝øÏ≤ªŒ»‘ˆ¥Û
-  126          #define SPEED_CURVE_MIN                 0.42f            // «˙¬ ΩµÀŸœ¬œﬁ£ªÕ‰÷–Ã´¬˝‘ˆ¥Û£¨≥ÂÕ‰ºı–°
+  124          #define DIFF_CAP_RATIO_BASE              0.16f
+  125          #define DIFF_CAP_RATIO_CURVE_ADD         0.08f
+  126          #define DIFF_CAP_MIN                     14
   127          
-  128          // ƒø±ÍÀŸ∂»–±∆¬£®“÷÷∆ÀŸ∂»Õª±‰µº÷¬≥µ…Ì≤ªŒ»£©
-  129          #define TARGET_STEP_UP_STRAIGHT         8.0f             // ÷±µ¿√ø÷‹∆⁄◊Ó¥Û…˝ÀŸ¬ˆ≥Â£ªÕªº”ÀŸºı–°
-  130          #define TARGET_STEP_UP_TURN             1.4f             // Õ‰µ¿√ø÷‹∆⁄◊Ó¥Û…˝ÀŸ¬ˆ≥Â£ªÕ‰÷–º”ÀŸ√˜œ‘ºı–°
-  131          #define TARGET_STEP_DOWN                220.0f           // √ø÷‹∆⁄◊Ó¥ÛΩµÀŸ¬ˆ≥Â£ªºıÀŸ≤ªº∞ ±‘ˆ¥Û
-  132          #define TARGET_SCALE_MIN                0.30f            // œ‡∂‘ª˘¥°ÀŸ∂»◊Ó–°±»¿˝£ªπ˝¬˝ø…‘ˆ¥Û
-  133          #define TARGET_SCALE_MAX                1.15f            // œ‡∂‘ª˘¥°ÀŸ∂»◊Ó¥Û±»¿˝£ªπ˝√Õº”ÀŸø…ºı–°
-  134          
-  135          // ------------------------- ÷±µ¿º”ÀŸ£®µ•¬ﬂº≠£© -------------------------
-  136          #define STRAIGHT_ACCEL_ENABLE           0                // 0πÿ±’œ»µ˜Œ»£¨1ø™∆Ù‘ŸÃ·Œ≤ÀŸ
-  137          #define STRAIGHT_SPEED_BOOST            1.03f            // ÷±µ¿º”ÀŸ±∂¬ £ªº”ÀŸÕªÿ£ºı–°
-  138          #define STRAIGHT_BOOST_PREVIEW_TH       2.2f             // ÷±µ¿º”ÀŸ«∞’∞„–÷µ£ªÕ‰«∞ŒÛº”ÀŸºı–°
-  139          #define STRAIGHT_BOOST_OFFSET_TH        1.2f             // ÷±µ¿º”ÀŸ∆´≤Ó„–÷µ£ª≥µ…ÌŒ¥’˝ªπº”ÀŸ‘Úºı–°
-  140          #define STRAIGHT_BOOST_GYRO_TH          32.0f            // ÷±µ¿º”ÀŸΩ«ÀŸ∂»„–÷µ£ª◊ÀÃ¨≤ªŒ»ªπº”ÀŸ‘Úºı–°
-  141          #define STRAIGHT_BOOST_DPREVIEW_TH      0.25f            // ÷±µ¿º”ÀŸ«∞’∞±‰ªØ¬ „–÷µ£ª≥§÷±≥ÂÕ‰‘Úºı–°
-  142          #define STRAIGHT_BOOST_STABLE_CYCLES    12               // Œ»∂®÷‹∆⁄√≈º˜£ª¥•∑¢Ã´∆µ∑±ø…‘ˆ¥Û
-  143          
-  144          // ------------------------- ∫Û¬÷≤ÓÀŸ£®Œ¬∫Õ£© -------------------------
-  145          #define DIFF_K_STRAIGHT                 0.00f            // ÷±µ¿≤ÓÀŸœµ ˝£ª÷±µ¿Ω®“È±£≥÷ 0
-  146          #define DIFF_K_ENTRY                    0.70f            // »ÎÕ‰≤ÓÀŸœµ ˝£ª»ÎÕ‰◊™œÚ≤ª◊„ø…‘ˆ¥Û
-  147          #define DIFF_K_APEX                     0.98f            // Õ‰÷–≤ÓÀŸœµ ˝£ªÃ˘Õ‚œﬂø…‘ˆ¥Û£¨∫Û¬÷«¿∑ΩœÚºı–°
-  148          #define DIFF_K_EXIT                     0.56f            // ≥ˆÕ‰≤ÓÀŸœµ ˝£ª≥ˆÕ‰÷∏œÚ¬˝ø…‘ˆ¥Û
-  149          #define DIFF_K_RECOVERY                 1.05f            // æ»≥µ≤ÓÀŸœµ ˝£ªæ»≥µ≤ª◊„ø…‘ˆ¥Û
-  150          #define DIFF_OUTSIDE_BOOST_MUL          1.10f            // Õ‚∆Ø ±≤ÓÀŸ∏Ωº”±∂ ˝£ªÕ‚∆Øƒ—ªÿ÷–‘ˆ¥Û£¨∫Û¬÷«¿∑Ωœ
-             -Úºı–°
-  151          #define DIFF_FILTER_ALPHA               0.45f            // ≤ÓÀŸµÕÕ®£ª∫Û¬÷∂∂∂Ø¥Ûºı–°
-  152          
-  153          #define DIFF_MAX_CAP_RATIO              0.24f            // ≤ÓÀŸ…œœﬁ’º±»£ª∫Û¬÷÷˜µº◊ÀÃ¨ºı–°
-  154          #define DIFF_MIN_CAP                    16               // ≤ÓÀŸœ¬œﬁ±£ª§£ªµÕÀŸ≤ÓÀŸŒﬁ∏–ø…‘ˆ¥Û
-  155          
-  156          #define DIFF_INNER_MIN_RATIO            0.26f            // Õ‰÷–ƒ⁄¬÷◊Ó–°ÀŸ∂»±»¿˝£ªƒ⁄¬÷ÕœÀ¿ø…‘ˆ¥Û
-  157          #define DIFF_INNER_MIN_STEER_TH         12.0f            // ∆Ù”√ƒ⁄¬÷◊Ó–°ÀŸ∂»µƒ∂ÊΩ«„–÷µ
-  158          #define DIFF_INNER_MIN_PREVIEW_TH       9.5f             // ∆Ù”√ƒ⁄¬÷◊Ó–°ÀŸ∂»µƒ«∞’∞„–÷µ
-  159          
-  160          volatile uint8 print_flag = 0;
-  161          
-  162          //  ÷∂Øø…µ˜÷˜‘ˆ“Ê£®œ»µ˜’‚»˝∏ˆ£©
-  163          float servo_kp = 0.46f;                                   // ±»¿˝‘ˆ“Ê£ª»ÎÕ‰¬˝‘ˆ¥Û£¨∞⁄∂Ø¥Ûºı–°
-  164          float servo_kd = 0.12f;                                   // Õ”¬›◊Ëƒ·£ª∞⁄∂Ø¥Û‘ˆ¥Û£¨◊™œÚ≥Ÿ÷Õºı–°
-  165          float servo_kff = 0.38f;                                  // «∞’∞«∞¿°£ªÃ˘Õ‚œﬂ‘ˆ¥Û£¨Õ‰«∞π˝≥Âºı–°
+  128          #define DIFF_INNER_MIN_STEER_TH          12.0f
+  129          #define DIFF_INNER_MIN_CURVE_TH          0.45f
+  130          #define DIFF_INNER_MIN_RATIO             0.18f
+  131          
+  132          volatile uint8 print_flag = 0;
+  133          
+  134          // ª˘¥°ÀŸ∂»£®0~90£©
+  135          int target_speed_base = 28;
+  136          
+  137          // ∂Êª˙÷˜≤Œ ˝£∫Ã·ÀŸ∫Û”≈œ»µ˜’‚»˝∏ˆ
+  138          float servo_kp = 0.35f;
+  139          float servo_kd = 0.11f;
+  140          float servo_kff = 0.18f;
+  141          
+  142          static float abs_f(float x)
+  143          {
+  144   1          return (x >= 0.0f) ? x : -x;
+  145   1      }
+  146          
+  147          static float clamp_f(float x, float min_v, float max_v)
+  148          {
+  149   1          if (x < min_v) return min_v;
+  150   1          if (x > max_v) return max_v;
+  151   1          return x;
+  152   1      }
+  153          
+  154          static float clamp_steer_f(float x)
+  155          {
+  156   1          if (x > SERVO_OUT_LIMIT_RIGHT) return SERVO_OUT_LIMIT_RIGHT;
+  157   1          if (x < -SERVO_OUT_LIMIT_LEFT) return -SERVO_OUT_LIMIT_LEFT;
+  158   1          return x;
+  159   1      }
+  160          
+  161          static float steer_limit_for_side(float steer)
+  162          {
+  163   1          if (steer >= 0.0f) return SERVO_OUT_LIMIT_RIGHT;
+  164   1          return SERVO_OUT_LIMIT_LEFT;
+  165   1      }
   166          
-  167          // ª˘¥°ÀŸ∂»÷∏¡Ó£®0~90£©
-  168          int target_speed_base = 20;                               // œ»Œ»∫ÛøÏ£ªŒ»Ã¨∫Û‘Ÿ∞¥ +1 Ã·ÀŸ
-  169          
-  170          PID servo_pid = {0};
-  171          
-  172          typedef enum
-  173          {
-  174              TRACK_STRAIGHT = 0,
-  175              TRACK_ENTRY    = 1,
-  176              TRACK_APEX     = 2,
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 4   
+  167          // Ackermann≤ÓÀŸ≤È±Ì£®3~20∂»£©
+  168          static float diff_gamma_from_steer(float abs_steer)
+  169          {
+  170   1          static const float gamma_lut[21] = {
+  171   1              0.0000f, 0.0000f, 0.0000f, 0.0382f, 0.0512f, 0.0643f, 0.0774f,
+  172   1              0.0913f, 0.1053f, 0.1201f, 0.1346f, 0.1498f, 0.1669f, 0.1835f,
+  173   1              0.2017f, 0.2198f, 0.2442f, 0.2684f, 0.2928f, 0.3262f, 0.3550f
+  174   1          };
+  175   1          int idx_low;
+  176   1          int idx_high;
+  177   1          float frac;
+  178   1      
+  179   1          if (abs_steer <= 0.0f) return 0.0f;
+  180   1          if (abs_steer <= 3.0f) return gamma_lut[3] * (abs_steer / 3.0f);
+  181   1          if (abs_steer >= 20.0f) return gamma_lut[20];
+  182   1      
+  183   1          idx_low = (int)abs_steer;
+  184   1          if (idx_low < 3) idx_low = 3;
+  185   1          if (idx_low >= 20) idx_low = 19;
+  186   1          idx_high = idx_low + 1;
+  187   1          frac = abs_steer - (float)idx_low;
+  188   1      
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 4   
 
-  177              TRACK_EXIT     = 3,
-  178              TRACK_RECOVERY = 4
-  179          } track_state_e;
-  180          
-  181          static float abs_f(float x)
-  182          {
-  183   1          return (x >= 0.0f) ? x : -x;
-  184   1      }
-  185          
-  186          static float clamp_f(float x, float min_v, float max_v)
-  187          {
-  188   1          if (x < min_v) return min_v;
-  189   1          if (x > max_v) return max_v;
-  190   1          return x;
-  191   1      }
-  192          
-  193          void control_init(void)
-  194          {
-  195   1          left_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
-  196   1          right_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
-  197   1      
-  198   1          // ±£¡Ù‘≠ PID Ω·ππ£¨≤ª∏ƒµ◊≤„Ω”ø⁄
-  199   1          PID_Init(&servo_pid, 0.1f, 0.0f, 0.1f, 0, 40);
-  200   1      }
-  201          
-  202          void control_loop(void)
-  203          {
-  204   1          static uint8 loop_cnt = 0;
-  205   1      
-  206   1          static float gyro_z_filtered = 0.0f;
-  207   1          static float offset_filtered = 0.0f;
-  208   1          static float preview_filtered = 0.0f;
-  209   1          static float preview_last = 0.0f;
-  210   1      
-  211   1          static float preview_raw_last = 0.0f;
-  212   1          static float servo_out_last = 0.0f;
-  213   1          static float steer_raw_filtered = 0.0f;
-  214   1          static float target_pulses_ramped = 0.0f;
-  215   1          static float diff_filtered = 0.0f;
+  189   1          return gamma_lut[idx_low] + (gamma_lut[idx_high] - gamma_lut[idx_low]) * frac;
+  190   1      }
+  191          
+  192          void control_init(void)
+  193          {
+  194   1          left_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
+  195   1          right_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
+  196   1      }
+  197          
+  198          void control_loop(void)
+  199          {
+  200   1          static uint8 loop_cnt = 0;
+  201   1          static uint8 lpf_init = 0;
+  202   1          static uint8 hard_brake_cnt = 0;
+  203   1          static uint8 outside_hold_cnt = 0;
+  204   1      
+  205   1          static float offset_filtered = 0.0f;
+  206   1          static float preview_filtered = 0.0f;
+  207   1          static float preview_last = 0.0f;
+  208   1          static float gyro_z_filtered = 0.0f;
+  209   1          static float err_last = 0.0f;
+  210   1          static float errd_filtered = 0.0f;
+  211   1          static float steer_raw_filtered = 0.0f;
+  212   1          static float steer_out_last = 0.0f;
+  213   1          static float target_pulses_ramped = 0.0f;
+  214   1          static float diff_filtered = 0.0f;
+  215   1          static float diff_limited = 0.0f;
   216   1      
-  217   1          static uint8 lpf_init = 0;
-  218   1          static uint8 track_state = TRACK_STRAIGHT;
-  219   1          static uint8 state_hold = 0;
-  220   1          static uint16 straight_counter = 0;
-  221   1          static uint8 long_straight_brake_cnt = 0;
-  222   1      
-  223   1          static uint8 hard_entry_brake_cnt = 0;
-  224   1          static uint8 reverse_turn_cnt = 0;
-  225   1          int near_y;
-  226   1          int far_y;
-  227   1          int near_mid;
-  228   1          int far_mid;
-  229   1      
-  230   1          int offset_raw;
-  231   1          int offset;
-  232   1      
-  233   1          float preview_raw;
-  234   1          float preview_delta;
-  235   1      
-  236   1          float preview_prev;
-  237   1          float preview_raw_delta;
-  238   1          float offset_lpf_alpha;
-  239   1          float gyro_z_actual;
-  240   1      
-  241   1          float abs_preview;
-  242   1          float abs_offset;
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 5   
-
-  243   1          float abs_gyro;
-  244   1      
-  245   1          uint8 straight_cond;
-  246   1          uint8 entry_cond;
-  247   1          uint8 apex_cond;
-  248   1          uint8 exit_cond;
-  249   1          uint8 recovery_cond;
-  250   1      
-  251   1          uint8 hard_entry_cond;
-  252   1          uint8 outside_drift;
-  253   1          uint8 prev_state;
+  217   1          int offset_raw;
+  218   1          int preview_raw_i;
+  219   1          float preview_raw;
+  220   1      
+  221   1          float offset_alpha;
+  222   1          float offset_ctrl;
+  223   1          float abs_err;
+  224   1          float errd_raw;
+  225   1          float errd_abs;
+  226   1      
+  227   1          float preview_delta;
+  228   1          float preview_delta_abs;
+  229   1          float abs_preview;
+  230   1      
+  231   1          float curve_score;
+  232   1          float curve_intensity;
+  233   1      
+  234   1          float kp_mul;
+  235   1          float kd_mul;
+  236   1          float step_base;
+  237   1          float blend_t;
+  238   1      
+  239   1          float kp_now;
+  240   1          float kd_now;
+  241   1          float lat_d_now;
+  242   1          float head_kp_now;
+  243   1          float head_kd_now;
+  244   1          float lat_term;
+  245   1          float head_term;
+  246   1          float ff_limit;
+  247   1      
+  248   1          float steer_raw;
+  249   1          float steer_alpha;
+  250   1          float steer_step_limit;
+  251   1          float delta_out;
+  252   1          float steer_out;
+  253   1          float abs_steer;
   254   1      
-  255   1          float kp_mul;
-  256   1          float kd_mul;
-  257   1          float kff_mul;
-  258   1          float rate_limit;
-  259   1          float steer_raw_alpha;
-  260   1          float offset_ctrl;
-  261   1          float abs_offset_ctrl;
-  262   1          uint8 small_err_straight;
-  263   1      
-  264   1          float ff_term;
-  265   1          float steer_raw;
-  266   1          float steer_out;
-  267   1          float delta_out;
-  268   1          float current_angle;
-  269   1      
-  270   1          int base_pulses;
-  271   1          int target_pulses;
-  272   1          int target_pulses_des;
-  273   1          int target_pulses_min;
-  274   1          int target_pulses_max;
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 5   
+
+  255   1          int turn_dir;
+  256   1          uint8 outside_drift;
+  257   1          uint8 outside_raw;
+  258   1          uint8 entry_phase;
+  259   1          uint8 exit_phase;
+  260   1      
+  261   1          float conf_scale;
+  262   1          float speed_scale_curve;
+  263   1          float speed_scale_steer;
+  264   1          float speed_scale_conf;
+  265   1          float speed_scale_total;
+  266   1          float steer_norm;
+  267   1          float steer_limit_now;
+  268   1      
+  269   1          int base_pulses;
+  270   1          int target_pulses_des;
+  271   1          int target_pulses_min;
+  272   1          int target_pulses_max;
+  273   1          int target_pulses;
+  274   1          float target_step_up;
   275   1      
-  276   1          float speed_keep_state;
-  277   1          float speed_keep_curve;
-  278   1          float speed_keep_total;
-  279   1          float curve_norm;
-  280   1      
-  281   1          float straight_boost_scale;
-  282   1          float accel_step_up;
-  283   1      
-  284   1          float abs_steer;
-  285   1          float diff_k;
-  286   1          float diff_cmd;
-  287   1          int diff_speed;
-  288   1          int diff_cap;
-  289   1          int inner_min_pulses;
-  290   1      
-  291   1          int left_target_pulses;
-  292   1          int right_target_pulses;
-  293   1      
-  294   1          // 1) º∆À„‘∂Ω¸«∞’∞
-  295   1          near_y = PREVIEW_Y_NEAR;
-  296   1          if (near_y >= MT9V03X_H) near_y = MT9V03X_H - 1;
-  297   1          if (near_y <= search_end_line) near_y = search_end_line + 1;
-  298   1      
-  299   1          far_y = PREVIEW_Y_FAR;
-  300   1          if (far_y <= search_end_line) far_y = search_end_line + 1;
-  301   1          if (far_y >= MT9V03X_H) far_y = MT9V03X_H - 1;
-  302   1      
-  303   1          near_mid = mid_line_list[near_y];
-  304   1          far_mid = mid_line_list[far_y];
-  305   1      
-  306   1          preview_raw = (float)(far_mid - near_mid);            // ”–∑˚∫≈«∞’∞£®¥¯∑ΩœÚ£©
-  307   1          offset_raw = (int)final_mid_line - MID_W;             // ”–∑˚∫≈∫·œÚ∆´≤Ó
-  308   1      
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 6   
+  276   1          float diff_gamma;
+  277   1          float diff_gain;
+  278   1          float diff_cmd;
+  279   1          float diff_step_limit;
+  280   1          float diff_delta;
+  281   1          int diff_speed;
+  282   1          int diff_cap;
+  283   1          float diff_cap_ratio;
+  284   1      
+  285   1          int left_target_pulses;
+  286   1          int right_target_pulses;
+  287   1          int inner_min_pulses;
+  288   1      
+  289   1          offset_raw = (int)camera_bias_raw;
+  290   1          if (offset_raw > 90) offset_raw = 90;
+  291   1          if (offset_raw < -90) offset_raw = -90;
+  292   1      
+  293   1          preview_raw_i = (int)camera_preview_raw;
+  294   1          if (preview_raw_i > 90) preview_raw_i = 90;
+  295   1          if (preview_raw_i < -90) preview_raw_i = -90;
+  296   1          preview_raw = (float)preview_raw_i;
+  297   1      
+  298   1          if (!lpf_init)
+  299   1          {
+  300   2              offset_filtered = (float)offset_raw;
+  301   2              preview_filtered = preview_raw;
+  302   2              preview_last = preview_raw;
+  303   2              gyro_z_filtered = 0.0f;
+  304   2              err_last = 0.0f;
+  305   2              errd_filtered = 0.0f;
+  306   2              steer_raw_filtered = 0.0f;
+  307   2              steer_out_last = 0.0f;
+  308   2              target_pulses_ramped = 0.0f;
+  309   2              diff_filtered = 0.0f;
+  310   2              diff_limited = 0.0f;
+  311   2              hard_brake_cnt = 0;
+  312   2              outside_hold_cnt = 0;
+  313   2              lpf_init = 1;
+  314   2          }
+  315   1      
+  316   1          abs_preview = abs_f(preview_filtered);
+  317   1          if (abs_preview >= 3.0f)
+  318   1              offset_alpha = OFFSET_LPF_ALPHA_CURVE;
+  319   1          else
+  320   1              offset_alpha = OFFSET_LPF_ALPHA_STRAIGHT;
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 6   
 
-  309   1          if (!lpf_init)
-  310   1          {
-  311   2              offset_filtered = (float)offset_raw;
-  312   2              preview_filtered = preview_raw;
-  313   2              preview_last = preview_raw;
-  314   2              preview_raw_last = preview_raw;
-  315   2              target_pulses_ramped = 0.0f;
-  316   2              steer_raw_filtered = 0.0f;
-  317   2              lpf_init = 1;
-  318   2          }
-  319   1      
-  320   1          // 2) µÕÕ®¬À≤®
-  321   1          if (abs_f(preview_filtered) >= STATE_ENTRY_PREVIEW_TH)
-  322   1          {
-  323   2              offset_lpf_alpha = OFFSET_LPF_ALPHA_CURVE;
-  324   2          }
-  325   1          else
-  326   1          {
-  327   2              offset_lpf_alpha = OFFSET_LPF_ALPHA_STRAIGHT;
-  328   2          }
-  329   1      
-  330   1          offset_filtered = offset_filtered * (1.0f - offset_lpf_alpha) + (float)offset_raw * offset_lpf_alpha;
-  331   1          preview_filtered = preview_filtered * (1.0f - PREVIEW_LPF_ALPHA) + preview_raw * PREVIEW_LPF_ALPHA;
-  332   1      
-  333   1          preview_prev = preview_last;
-  334   1          preview_delta = preview_filtered - preview_last;
-  335   1          preview_last = preview_filtered;
-  336   1          preview_raw_delta = preview_raw - preview_raw_last;
-  337   1          preview_raw_last = preview_raw;
-  338   1      
-  339   1          // 3) ªÒ»°Õ”¬›“«
-  340   1          imu660ra_get_gyro();
-  341   1          gyro_z_actual = imu660ra_gyro_transition(imu660ra_gyro_z);
-  342   1          gyro_z_filtered = (1.0f - GYRO_LPF_ALPHA) * gyro_z_filtered + GYRO_LPF_ALPHA * gyro_z_actual;
-  343   1      
-  344   1              // 4) ¬À≤®÷µ◊™’˚ ˝∆´≤Ó£¨≤¢∂‘◊™œÚ¡ø π”√»ÌÀ¿«¯£®±‹√‚ 0/∑«0 Ω◊‘æ£©
-  345   1          if (offset_filtered >= 0.0f)
-  346   1          {
-  347   2              offset = (int)(offset_filtered + 0.5f);
-  348   2          }
-  349   1          else
-  350   1          {
-  351   2              offset = (int)(offset_filtered - 0.5f);
-  352   2          }
-  353   1      
-  354   1          offset_ctrl = offset_filtered;
-  355   1          if (offset_ctrl <= SERVO_SOFT_DEADBAND_PIX && offset_ctrl >= -SERVO_SOFT_DEADBAND_PIX)
-  356   1          {
-  357   2              offset_ctrl = 0.0f;
-  358   2          }
-  359   1          else if (offset_ctrl > 0.0f)
-  360   1          {
-  361   2              offset_ctrl -= SERVO_SOFT_DEADBAND_PIX;
-  362   2          }
-  363   1          else
-  364   1          {
-  365   2              offset_ctrl += SERVO_SOFT_DEADBAND_PIX;
-  366   2          }
-  367   1      
-  368   1          abs_preview = abs_f(preview_filtered);
-  369   1          abs_offset = abs_f((float)offset);
-  370   1          abs_offset_ctrl = abs_f(offset_ctrl);
-  371   1          abs_gyro = abs_f(gyro_z_filtered);
-  372   1      
-  373   1          // ÷±œﬂƒ©∂À”≤»ÎÕ‰£∫”√”⁄°∞≥§÷±∫Û¥ÛÕ‰/SÕ‰Ω¯≤ª»•°±
-  374   1          hard_entry_cond = (straight_counter >= (LONG_STRAIGHT_COUNT_TH / 2)) &&
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 7   
+  321   1      
+  322   1          offset_filtered = offset_filtered * (1.0f - offset_alpha) + (float)offset_raw * offset_alpha;
+  323   1          preview_filtered = preview_filtered * (1.0f - PREVIEW_LPF_ALPHA) + preview_raw * PREVIEW_LPF_ALPHA;
+  324   1      
+  325   1          preview_delta = preview_filtered - preview_last;
+  326   1          preview_last = preview_filtered;
+  327   1          preview_delta_abs = abs_f(preview_delta);
+  328   1      
+  329   1          offset_ctrl = offset_filtered;
+  330   1          if (offset_ctrl <= SERVO_DEADBAND_PIX && offset_ctrl >= -SERVO_DEADBAND_PIX)
+  331   1          {
+  332   2              offset_ctrl = 0.0f;
+  333   2          }
+  334   1          else if (offset_ctrl > 0.0f)
+  335   1          {
+  336   2              offset_ctrl -= SERVO_DEADBAND_PIX;
+  337   2          }
+  338   1          else
+  339   1          {
+  340   2              offset_ctrl += SERVO_DEADBAND_PIX;
+  341   2          }
+  342   1      
+  343   1          imu660ra_get_gyro();
+  344   1          gyro_z_filtered = gyro_z_filtered * (1.0f - GYRO_LPF_ALPHA) + imu660ra_gyro_transition(imu660ra_gyro_
+             -z) * GYRO_LPF_ALPHA;
+  345   1      
+  346   1          abs_err = abs_f(offset_ctrl);
+  347   1          errd_raw = offset_ctrl - err_last;
+  348   1          err_last = offset_ctrl;
+  349   1          errd_filtered = errd_filtered * (1.0f - ERRD_LPF_ALPHA) + errd_raw * ERRD_LPF_ALPHA;
+  350   1          errd_abs = abs_f(errd_filtered);
+  351   1      
+  352   1          curve_score = CURVE_SCORE_PREVIEW_K * abs_f(preview_filtered)
+  353   1                      + CURVE_SCORE_DPV_K * preview_delta_abs
+  354   1                      + CURVE_SCORE_OFFSET_K * abs_err;
+  355   1          curve_intensity = curve_score / 12.0f;
+  356   1          curve_intensity = clamp_f(curve_intensity, 0.0f, 1.0f);
+  357   1      
+  358   1          turn_dir = (preview_filtered >= 0.0f) ? 1 : -1;
+  359   1          outside_raw = 0;
+  360   1          if ((abs_f(preview_filtered) >= OUTSIDE_PREVIEW_TH) &&
+  361   1              (abs_err >= OUTSIDE_ERR_TH) &&
+  362   1              (((offset_ctrl > 0.0f) && (turn_dir > 0)) || ((offset_ctrl < 0.0f) && (turn_dir < 0))))
+  363   1          {
+  364   2              outside_raw = 1;
+  365   2          }
+  366   1      
+  367   1          if (outside_raw)
+  368   1          {
+  369   2              outside_hold_cnt = OUTSIDE_HOLD_CYCLES;
+  370   2          }
+  371   1          else if (outside_hold_cnt > 0)
+  372   1          {
+  373   2              outside_hold_cnt--;
+  374   2          }
+  375   1          outside_drift = (outside_hold_cnt > 0) ? 1 : 0;
+  376   1      
+  377   1          entry_phase = 0;
+  378   1          if ((abs_f(preview_filtered) >= ENTRY_PREVIEW_TH) && (preview_delta_abs >= ENTRY_DPREVIEW_TH))
+  379   1          {
+  380   2              entry_phase = 1;
+  381   2          }
+  382   1      
+  383   1          exit_phase = 0;
+  384   1          if ((abs_f(preview_filtered) <= EXIT_PREVIEW_TH) &&
+  385   1              (preview_delta_abs <= EXIT_DPREVIEW_TH) &&
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 7   
 
-  375   1                            ((abs_f(preview_raw) >= HARD_ENTRY_PREVIEW_RAW_TH) ||
-  376   1                             (abs_f(preview_raw_delta) >= HARD_ENTRY_DPREVIEW_RAW_TH));
-  377   1      
-  378   1              // SÕ‰ªªœÚºÏ≤‚£∫”√”⁄°∞¡¨–¯Õ‰µ⁄∂˛Õ‰œÏ”¶¬˝°±
-  379   1          if ((abs_f(preview_prev) >= REVERSE_TURN_PREVIEW_TH) &&
-  380   1              (abs_preview >= REVERSE_TURN_PREVIEW_TH) &&
-  381   1              (preview_prev * preview_filtered < 0.0f))
-  382   1          {
-  383   2              reverse_turn_cnt = REVERSE_TURN_HOLD_CYCLES;
-  384   2          }
-  385   1          else if (reverse_turn_cnt > 0)
-  386   1          {
-  387   2              reverse_turn_cnt--;
-  388   2          }
-  389   1      
-  390   1          // 5) ◊¥Ã¨≈–∂®Ãıº˛£®º”»Î÷Õªÿ£¨“÷÷∆÷±œﬂ/»ÎÕ‰¿¥ªÿ«–ªª£©
-  391   1          if (track_state == TRACK_STRAIGHT)
-  392   1          {
-  393   2              straight_cond = (abs_preview <= STATE_STRAIGHT_PREVIEW_KEEP_TH) &&
-  394   2                              (abs_offset <= STATE_STRAIGHT_OFFSET_KEEP_TH) &&
-  395   2                              (abs_gyro <= STATE_STRAIGHT_GYRO_KEEP_TH);
-  396   2      
-  397   2              entry_cond = (abs_preview >= STATE_ENTRY_PREVIEW_ON_TH) ||
-  398   2                           (abs_f(preview_delta) >= STATE_ENTRY_DPREVIEW_ON_TH);
-  399   2          }
-  400   1          else
-  401   1          {
-  402   2              straight_cond = (abs_preview <= STATE_STRAIGHT_PREVIEW_BACK_TH) &&
-  403   2                              (abs_offset <= STATE_STRAIGHT_OFFSET_BACK_TH) &&
-  404   2                              (abs_gyro <= STATE_STRAIGHT_GYRO_BACK_TH);
-  405   2      
-  406   2              entry_cond = (abs_preview >= STATE_ENTRY_PREVIEW_OFF_TH) ||
-  407   2                           (abs_f(preview_delta) >= STATE_ENTRY_DPREVIEW_OFF_TH);
-  408   2          }
-  409   1      
-  410   1          apex_cond = (abs_preview >= STATE_APEX_PREVIEW_TH) ||
-  411   1                      (abs_offset >= (STATE_STRAIGHT_OFFSET_TH + 3.0f));
-  412   1      
-  413   1          exit_cond = (abs_preview <= STATE_EXIT_PREVIEW_TH) &&
-  414   1                      (abs_offset <= STATE_EXIT_OFFSET_TH) &&
-  415   1                      (abs_gyro <= STATE_STRAIGHT_GYRO_TH);
-  416   1      
-  417   1          recovery_cond = (abs_offset >= STATE_RECOVERY_OFFSET_TH);
-  418   1      
-  419   1          // ÷±µ¿¿€º∆£∫”√”⁄≥§÷±∫ÛÃ·«∞÷ÿ…≤
-  420   1          if (straight_cond)
-  421   1          {
-  422   2              if (straight_counter < 60000) straight_counter++;
-  423   2          }
-  424   1          else if (track_state == TRACK_STRAIGHT)
-  425   1          {
-  426   2              straight_counter = 0;
-  427   2          }
-  428   1      
-  429   1          // 6) ◊¥Ã¨ª˙£®¥¯◊Ó∂Ã±£≥÷£¨±‹√‚∂∂∂Ø«–ªª£©
-  430   1          prev_state = track_state;
-  431   1      
-  432   1          if (state_hold > 0) state_hold--;
-  433   1      
-  434   1          switch (track_state)
-  435   1          {
-  436   2          case TRACK_STRAIGHT:
-  437   2              if (hard_entry_cond)
-  438   2              {
-  439   3                  track_state = TRACK_ENTRY;
-  440   3                  state_hold = STATE_ENTRY_HOLD_CYCLES;
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 8   
+  386   1              (abs_f(steer_out_last) <= EXIT_STEER_TH))
+  387   1          {
+  388   2              exit_phase = 1;
+  389   2          }
+  390   1      
+  391   1          // ∑÷∂Œ‘ˆ“Ê£∫÷±œﬂŒ»°¢Õ‰µ¿øÏ
+  392   1          if (abs_err <= ERR_SMALL_TH)
+  393   1          {
+  394   2              kp_mul = KP_MUL_SMALL;
+  395   2              kd_mul = KD_MUL_SMALL;
+  396   2              step_base = STEP_SMALL;
+  397   2          }
+  398   1          else if (abs_err <= ERR_MID_TH)
+  399   1          {
+  400   2              blend_t = (abs_err - ERR_SMALL_TH) / (ERR_MID_TH - ERR_SMALL_TH);
+  401   2              kp_mul = KP_MUL_SMALL + (KP_MUL_MID - KP_MUL_SMALL) * blend_t;
+  402   2              kd_mul = KD_MUL_SMALL + (KD_MUL_MID - KD_MUL_SMALL) * blend_t;
+  403   2              step_base = STEP_SMALL + (STEP_MID - STEP_SMALL) * blend_t;
+  404   2          }
+  405   1          else
+  406   1          {
+  407   2              kp_mul = KP_MUL_LARGE;
+  408   2              kd_mul = KD_MUL_LARGE;
+  409   2              step_base = STEP_LARGE;
+  410   2          }
+  411   1      
+  412   1          // ÷±œﬂ–°ŒÛ≤Ó∏ﬂ∆µ∞⁄∂Ø“÷÷∆
+  413   1          if ((abs_err <= ERR_SMALL_TH) && (errd_abs >= SMALL_OSC_DERR_TH))
+  414   1          {
+  415   2              kp_mul *= SMALL_OSC_KP_MUL;
+  416   2              kd_mul *= SMALL_OSC_KD_MUL;
+  417   2              step_base *= SMALL_OSC_STEP_MUL;
+  418   2          }
+  419   1      
+  420   1          // À´PD»⁄∫œ£∫∫·œÚPD + «∞’∞PD + Õ”¬›◊Ëƒ·
+  421   1          kp_now = servo_kp * (1.0f + 0.55f * curve_intensity) * kp_mul;
+  422   1          kd_now = servo_kd * (1.0f + DUAL_PD_GYRO_D_CURVE_ADD * curve_intensity) * kd_mul;
+  423   1          lat_d_now = (servo_kp * DUAL_PD_LAT_D_BASE) * (1.0f + DUAL_PD_LAT_D_CURVE_ADD * curve_intensity) * kd
+             -_mul;
+  424   1      
+  425   1          head_kp_now = servo_kff * (1.0f + DUAL_PD_HEAD_P_CURVE_ADD * curve_intensity);
+  426   1          head_kd_now = head_kp_now * STEER_FF_DPREVIEW_K * DUAL_PD_HEAD_D_GAIN;
+  427   1      
+  428   1          lat_term = (-kp_now * offset_ctrl) - (lat_d_now * errd_filtered);
+  429   1          head_term = (head_kp_now * preview_filtered) + (head_kd_now * preview_delta);
+  430   1      
+  431   1          ff_limit = STEER_FF_LIMIT_BASE + STEER_FF_LIMIT_CURVE_ADD * curve_intensity;
+  432   1          if ((abs_err <= STEER_FF_SUPPRESS_ERR_TH) && (abs_f(preview_filtered) <= STEER_FF_SUPPRESS_PREVIEW_TH
+             -))
+  433   1          {
+  434   2              head_term *= STEER_FF_SUPPRESS_MUL;
+  435   2          }
+  436   1      
+  437   1          if (outside_drift)
+  438   1          {
+  439   2              head_term *= OUTSIDE_FF_SUPPRESS;
+  440   2          }
+  441   1      
+  442   1          if (exit_phase)
+  443   1          {
+  444   2              head_term *= DUAL_PD_EXIT_HEAD_KEEP;
+  445   2          }
+  446   1      
+  447   1          head_term = clamp_f(head_term, -ff_limit, ff_limit);
+  448   1      
+  449   1          steer_raw = lat_term + head_term - (kd_now * gyro_z_filtered);
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 8   
 
-  441   3                  hard_entry_brake_cnt = HARD_ENTRY_BRAKE_CYCLES;
-  442   3              }
-  443   2              else if (recovery_cond)
-  444   2              {
-  445   3                  track_state = TRACK_RECOVERY;
-  446   3                  state_hold = STATE_RECOVERY_HOLD_CYCLES;
-  447   3              }
-  448   2              else if (entry_cond)
-  449   2              {
-  450   3                  track_state = TRACK_ENTRY;
-  451   3                  state_hold = STATE_ENTRY_HOLD_CYCLES;
-  452   3              }
-  453   2              break;
-  454   2      
-  455   2          case TRACK_ENTRY:
-  456   2              if (recovery_cond)
-  457   2              {
-  458   3                  track_state = TRACK_RECOVERY;
-  459   3                  state_hold = STATE_RECOVERY_HOLD_CYCLES;
-  460   3              }
-  461   2              else if ((state_hold == 0) && apex_cond)
-  462   2              {
-  463   3                  track_state = TRACK_APEX;
-  464   3                  state_hold = STATE_APEX_HOLD_CYCLES;
-  465   3              }
-  466   2              else if ((state_hold == 0) && straight_cond && !entry_cond)
-  467   2              {
-  468   3                  track_state = TRACK_STRAIGHT;
-  469   3              }
-  470   2              break;
-  471   2      
-  472   2          case TRACK_APEX:
-  473   2              if ((reverse_turn_cnt > 0) && entry_cond)
-  474   2              {
-  475   3                  track_state = TRACK_ENTRY;
-  476   3                  state_hold = STATE_ENTRY_HOLD_CYCLES;
-  477   3              }
-  478   2              else if (recovery_cond)
-  479   2              {
-  480   3                  track_state = TRACK_RECOVERY;
-  481   3                  state_hold = STATE_RECOVERY_HOLD_CYCLES;
-  482   3              }
-  483   2              else if ((state_hold == 0) && exit_cond)
-  484   2              {
-  485   3                  track_state = TRACK_EXIT;
-  486   3                  state_hold = STATE_EXIT_HOLD_CYCLES;
-  487   3              }
-  488   2              break;
-  489   2      
-  490   2          case TRACK_EXIT:
-  491   2              if (recovery_cond)
-  492   2              {
-  493   3                  track_state = TRACK_RECOVERY;
-  494   3                  state_hold = STATE_RECOVERY_HOLD_CYCLES;
-  495   3              }
-  496   2              else if ((state_hold == 0) && straight_cond)
-  497   2              {
-  498   3                  track_state = TRACK_STRAIGHT;
-  499   3              }
-  500   2              else if (((state_hold == 0) || (reverse_turn_cnt > 0)) && entry_cond)
-  501   2              {
-  502   3                  track_state = TRACK_ENTRY;
-  503   3                  state_hold = STATE_ENTRY_HOLD_CYCLES;
-  504   3              }
-  505   2              break;
-  506   2      
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 9   
+  450   1      
+  451   1          if (outside_drift)
+  452   1          {
+  453   2              steer_raw += (-OUTSIDE_PULL_K * offset_ctrl);
+  454   2          }
+  455   1      
+  456   1          if (steer_raw >= 0.0f)
+  457   1              steer_raw = steer_raw * RIGHT_TURN_STEER_MUL;
+  458   1      
+  459   1          steer_alpha = STEER_RAW_ALPHA_STRAIGHT + (STEER_RAW_ALPHA_CURVE - STEER_RAW_ALPHA_STRAIGHT) * curve_i
+             -ntensity;
+  460   1          if (outside_drift)
+  461   1          {
+  462   2              steer_alpha += 0.08f;
+  463   2              if (steer_alpha > 0.85f) steer_alpha = 0.85f;
+  464   2          }
+  465   1      
+  466   1          steer_raw_filtered = steer_raw_filtered * (1.0f - steer_alpha) + steer_raw * steer_alpha;
+  467   1          steer_raw = clamp_steer_f(steer_raw_filtered);
+  468   1      
+  469   1          steer_step_limit = step_base * (1.0f + 0.40f * curve_intensity);
+  470   1          if (entry_phase)
+  471   1          {
+  472   2              steer_step_limit *= 1.25f;
+  473   2          }
+  474   1          if (outside_drift)
+  475   1          {
+  476   2              steer_step_limit *= OUTSIDE_STEP_MUL;
+  477   2          }
+  478   1      
+  479   1          if ((preview_delta_abs >= STEP_REVERSE_DPV_TH) &&
+  480   1              ((steer_out_last > 0.0f && steer_raw < 0.0f) || (steer_out_last < 0.0f && steer_raw > 0.0f)))
+  481   1          {
+  482   2              steer_step_limit *= STEP_REVERSE_MUL;
+  483   2          }
+  484   1      
+  485   1          if (steer_step_limit < STEP_MIN) steer_step_limit = STEP_MIN;
+  486   1      
+  487   1          delta_out = steer_raw - steer_out_last;
+  488   1          if (delta_out > steer_step_limit)
+  489   1              steer_out = steer_out_last + steer_step_limit;
+  490   1          else if (delta_out < -steer_step_limit)
+  491   1              steer_out = steer_out_last - steer_step_limit;
+  492   1          else
+  493   1              steer_out = steer_raw;
+  494   1      
+  495   1          steer_out = clamp_steer_f(steer_out);
+  496   1          steer_out_last = steer_out;
+  497   1          abs_steer = abs_f(steer_out);
+  498   1      
+  499   1          servo_set_angle(SERVO_CENTER + steer_out);
+  500   1      
+  501   1          conf_scale = (float)camera_confidence / 100.0f;
+  502   1          conf_scale = clamp_f(conf_scale, 0.0f, 1.0f);
+  503   1      
+  504   1          if (conf_scale < 0.55f)
+  505   1          {
+  506   2              curve_intensity = clamp_f(curve_intensity + 0.18f, 0.0f, 1.0f);
+  507   2          }
+  508   1      
+  509   1          speed_scale_curve = 1.0f / (1.0f + SPEED_CURVE_K * curve_intensity * curve_intensity);
+  510   1          if (speed_scale_curve < SPEED_CURVE_MIN) speed_scale_curve = SPEED_CURVE_MIN;
+  511   1      
+  512   1          steer_limit_now = steer_limit_for_side(steer_out);
+  513   1          if (steer_limit_now < 1.0f) steer_limit_now = 1.0f;
+  514   1          steer_norm = abs_steer / steer_limit_now;
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 9   
 
-  507   2          default:    // TRACK_RECOVERY
-  508   2              if ((state_hold == 0) && (abs_offset <= STATE_EXIT_OFFSET_TH))
-  509   2              {
-  510   3                  if (entry_cond)
-  511   3                  {
-  512   4                      track_state = TRACK_ENTRY;
-  513   4                      state_hold = STATE_ENTRY_HOLD_CYCLES;
-  514   4                  }
-  515   3                  else
-  516   3                  {
-  517   4                      track_state = TRACK_STRAIGHT;
-  518   4                  }
-  519   3              }
-  520   2              break;
-  521   2          }
+  515   1          if (steer_norm > 1.0f) steer_norm = 1.0f;
+  516   1      
+  517   1          speed_scale_steer = 1.0f - SPEED_STEER_K * steer_norm * steer_norm;
+  518   1          if (speed_scale_steer < SPEED_STEER_MIN) speed_scale_steer = SPEED_STEER_MIN;
+  519   1      
+  520   1          speed_scale_conf = SPEED_CONF_MIN + (1.0f - SPEED_CONF_MIN) * conf_scale;
+  521   1          speed_scale_total = speed_scale_curve * speed_scale_steer * speed_scale_conf;
   522   1      
-  523   1          // º«¬º≥§÷±∫Û»ÎÕ‰…≤≥µ¥•∑¢
-  524   1          if ((prev_state == TRACK_STRAIGHT) && (track_state == TRACK_ENTRY))
-  525   1          {
-  526   2              if (straight_counter >= LONG_STRAIGHT_COUNT_TH)
-  527   2              {
-  528   3                  long_straight_brake_cnt = LONG_STRAIGHT_BRAKE_CYCLES;
-  529   3              }
-  530   2              straight_counter = 0;
+  523   1          if (entry_phase)
+  524   1          {
+  525   2              speed_scale_total *= ENTRY_BRAKE_KEEP;
+  526   2          }
+  527   1      
+  528   1          if ((abs_f(preview_filtered) >= TRANS_BRAKE_PREVIEW_TH) && (preview_delta_abs >= TRANS_BRAKE_DPV_TH))
+  529   1          {
+  530   2              speed_scale_total *= TRANS_BRAKE_KEEP;
   531   2          }
-  532   1          else if (track_state != TRACK_ENTRY)
-  533   1          {
-  534   2              long_straight_brake_cnt = 0;
-  535   2          }
-  536   1      
-  537   1          // Õ‚∆ØºÏ≤‚£∫∆´≤Ó∑ΩœÚ”ÎÕ‰œÚ“ª÷¬ ±£¨≈–∂®Œ™°∞’˝‘⁄œÚÕ‚≤‡∆Ø°±
-  538   1          outside_drift = 0;
-  539   1          if ((track_state != TRACK_STRAIGHT) &&
-  540   1              (abs_preview >= CURVE_OUTSIDE_PREVIEW_TH) &&
-  541   1              (abs_offset >= CURVE_CENTER_ERR_TH) &&
-  542   1              (((offset > 0) && (preview_filtered > 0.0f)) ||
-  543   1               ((offset < 0) && (preview_filtered < 0.0f))))
-  544   1          {
-  545   2              outside_drift = 1;
-  546   2          }
-  547   1      
-  548   1          // 7) ◊™œÚ‘ˆ“Êµ˜∂»
-  549   1          kp_mul = 1.0f;
-  550   1          kd_mul = 1.0f;
-  551   1          kff_mul = 1.0f;
-  552   1          rate_limit = SERVO_RATE_STRAIGHT;
+  532   1      
+  533   1          if ((abs_f(preview_filtered) >= HARD_BRAKE_PREVIEW_TH) && (preview_delta_abs >= HARD_BRAKE_DPV_TH))
+  534   1          {
+  535   2              hard_brake_cnt = HARD_BRAKE_HOLD_CYCLES;
+  536   2          }
+  537   1      
+  538   1          if (hard_brake_cnt > 0)
+  539   1          {
+  540   2              speed_scale_total *= HARD_BRAKE_KEEP;
+  541   2              hard_brake_cnt--;
+  542   2          }
+  543   1      
+  544   1          if (outside_drift)
+  545   1          {
+  546   2              speed_scale_total *= OUTSIDE_SPEED_KEEP;
+  547   2          }
+  548   1      
+  549   1          if (exit_phase && !outside_drift)
+  550   1          {
+  551   2              speed_scale_total *= EXIT_RELEASE_BOOST;
+  552   2          }
   553   1      
-  554   1          switch (track_state)
-  555   1          {
-  556   2          case TRACK_STRAIGHT:
-  557   2              kp_mul = STEER_GAIN_STRAIGHT_MUL;
-  558   2              kd_mul = STEER_GYRO_STRAIGHT_MUL;
-  559   2              kff_mul = STEER_FF_STRAIGHT_MUL;
-  560   2              rate_limit = SERVO_RATE_STRAIGHT;
-  561   2              break;
-  562   2          case TRACK_ENTRY:
-  563   2              kp_mul = STEER_GAIN_ENTRY_MUL;
-  564   2              kd_mul = STEER_GYRO_ENTRY_MUL;
-  565   2              kff_mul = STEER_FF_ENTRY_MUL;
-  566   2              rate_limit = SERVO_RATE_ENTRY;
-  567   2              break;
-  568   2          case TRACK_APEX:
-  569   2              kp_mul = STEER_GAIN_APEX_MUL;
-  570   2              kd_mul = STEER_GYRO_APEX_MUL;
-  571   2              kff_mul = STEER_FF_APEX_MUL;
-  572   2              rate_limit = SERVO_RATE_APEX;
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 10  
-
-  573   2              break;
-  574   2          case TRACK_EXIT:
-  575   2              kp_mul = STEER_GAIN_EXIT_MUL;
-  576   2              kd_mul = STEER_GYRO_EXIT_MUL;
-  577   2              kff_mul = STEER_FF_EXIT_MUL;
-  578   2              rate_limit = SERVO_RATE_EXIT;
-  579   2              break;
-  580   2          default:
-  581   2              kp_mul = STEER_GAIN_RECOVERY_MUL;
-  582   2              kd_mul = STEER_GYRO_RECOVERY_MUL;
-  583   2              kff_mul = STEER_FF_RECOVERY_MUL;
-  584   2              rate_limit = SERVO_RATE_RECOVERY;
-  585   2              break;
-  586   2          }
-  587   1      
-  588   1          small_err_straight = (track_state == TRACK_STRAIGHT) &&
-  589   1                               (abs_offset_ctrl <= STRAIGHT_SMALL_ERR_TH) &&
-  590   1                               (abs_preview <= STRAIGHT_SMALL_PREVIEW_TH);
-  591   1          if (small_err_straight)
-  592   1          {
-  593   2              kp_mul = STEER_GAIN_STRAIGHT_SMALL_MUL;
-  594   2              kd_mul = STEER_GYRO_STRAIGHT_SMALL_MUL;
-  595   2              kff_mul = STEER_FF_STRAIGHT_SMALL_MUL;
-  596   2              rate_limit = SERVO_RATE_STRAIGHT_SMALL;
-  597   2          }
-  598   1      
-  599   1          if (reverse_turn_cnt > 0)
-  600   1          {
-  601   2              rate_limit *= REVERSE_TURN_RATE_MUL;
-  602   2              kff_mul *= REVERSE_TURN_FF_MUL;
-  603   2              if (track_state != TRACK_STRAIGHT)
-  604   2              {
-  605   3                  kp_mul *= 1.10f;
-  606   3              }
-  607   2          }
-  608   1          if (outside_drift)
-  609   1          {
-  610   2              rate_limit *= CURVE_OUTSIDE_RATE_MUL;
-  611   2          }
-  612   1      
-  613   1          // 8) ¡¨–¯∂Êª˙øÿ÷∆£∫∑¥¿° + «∞¿° + ÀŸ¬ œﬁ÷∆
-  614   1          ff_term = servo_kff * kff_mul * preview_filtered;
-  615   1          if (outside_drift)
-  616   1          {
-  617   2              ff_term *= CURVE_OUTSIDE_FF_SUPPRESS;
-  618   2          }
-  619   1          ff_term = clamp_f(ff_term, -PREVIEW_FF_LIMIT, PREVIEW_FF_LIMIT);
-  620   1      
-  621   1          steer_raw = (-(servo_kp * kp_mul) * offset_ctrl) - ((servo_kd * kd_mul) * gyro_z_filtered) + ff_term;
-  622   1          if (track_state != TRACK_STRAIGHT)
-  623   1          {
-  624   2              if (steer_raw >= 0.0f) steer_raw *= RIGHT_TURN_STEER_MUL;
-  625   2              else steer_raw *= LEFT_TURN_STEER_MUL;
-  626   2          }
-  627   1              if (outside_drift)
-  628   1          {
-  629   2              // Õ‚∆Ø ±∂ÓÕ‚ ©º”ªÿ÷–¿≠¡¶£¨ºı…Ÿ≥÷–¯Ã˘Õ‚œﬂ
-  630   2              steer_raw += (-CURVE_OUTSIDE_PULL_K * offset_ctrl);
-  631   2          }
-  632   1      
-  633   1          steer_raw_alpha = (track_state == TRACK_STRAIGHT) ? STEER_RAW_LPF_ALPHA_STRAIGHT : STEER_RAW_LPF_ALPH
-             -A_CURVE;
-  634   1          steer_raw_filtered = steer_raw_filtered * (1.0f - steer_raw_alpha) + steer_raw * steer_raw_alpha;
-  635   1          steer_raw = steer_raw_filtered;
-  636   1          steer_raw = clamp_f(steer_raw, -SERVO_OUT_LIMIT, SERVO_OUT_LIMIT);
-  637   1      
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 11  
-
-  638   1          delta_out = steer_raw - servo_out_last;
-  639   1          if (delta_out > rate_limit)
-  640   1          {
-  641   2              steer_out = servo_out_last + rate_limit;
-  642   2          }
-  643   1          else if (delta_out < -rate_limit)
-  644   1          {
-  645   2              steer_out = servo_out_last - rate_limit;
-  646   2          }
-  647   1          else
-  648   1          {
-  649   2              steer_out = steer_raw;
-  650   2          }
-  651   1      
-  652   1          steer_out = clamp_f(steer_out, -SERVO_OUT_LIMIT, SERVO_OUT_LIMIT);
-  653   1          servo_out_last = steer_out;
-  654   1      
-  655   1          current_angle = SERVO_CENTER + steer_out;
-  656   1          servo_set_angle(current_angle);
-  657   1      
-  658   1          // 9) ÀŸ∂»πÊªÆ£∫◊¥Ã¨ÀŸ∂» * «˙¬ ÀŸ∂»
-  659   1          switch (track_state)
-  660   1          {
-  661   2          case TRACK_STRAIGHT:
-  662   2              speed_keep_state = 1.00f;
-  663   2              break;
-  664   2          case TRACK_ENTRY:
-  665   2              speed_keep_state = SPEED_KEEP_ENTRY;
-  666   2              break;
-  667   2          case TRACK_APEX:
-  668   2              speed_keep_state = SPEED_KEEP_APEX_BASE;
-  669   2              break;
-  670   2          case TRACK_EXIT:
-  671   2              speed_keep_state = SPEED_KEEP_EXIT;
-  672   2              break;
-  673   2          default:
-  674   2              speed_keep_state = SPEED_KEEP_RECOVERY;
-  675   2              break;
-  676   2          }
-  677   1      
-  678   1          curve_norm = abs_preview / SPEED_CURVE_PREVIEW_SCALE;
-  679   1          if (curve_norm < 0.0f) curve_norm = 0.0f;
-  680   1          if (curve_norm > 1.6f) curve_norm = 1.6f;
-  681   1      
-  682   1          speed_keep_curve = 1.0f / (1.0f + SPEED_CURVE_K * curve_norm * curve_norm);
-  683   1          if (speed_keep_curve < SPEED_CURVE_MIN) speed_keep_curve = SPEED_CURVE_MIN;
-  684   1      
-  685   1          speed_keep_total = speed_keep_state * speed_keep_curve;
-  686   1      
-  687   1          // ≥§÷±∫Û»ÎÕ‰∂ÓÕ‚ºıÀŸ
-  688   1          if ((track_state == TRACK_ENTRY) && (long_straight_brake_cnt > 0))
-  689   1          {
-  690   2              speed_keep_total *= LONG_STRAIGHT_ENTRY_KEEP;
-  691   2              long_straight_brake_cnt--;
-  692   2          }
-  693   1      
-  694   1          if (hard_entry_brake_cnt > 0)
-  695   1          {
-  696   2              speed_keep_total *= HARD_ENTRY_BRAKE_KEEP;
-  697   2              hard_entry_brake_cnt--;
-  698   2          }
-  699   1      
-  700   1          if ((reverse_turn_cnt > 0) && (track_state != TRACK_STRAIGHT))
-  701   1          {
-  702   2              speed_keep_total *= REVERSE_TURN_SPEED_KEEP;
-  703   2          }
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 12  
-
-  704   1          if (outside_drift)
-  705   1          {
-  706   2              // Õ‚∆ØΩ◊∂Œ”≈œ»ªÿ÷–£¨œ»«·ΩµÀŸ‘Ÿ∏¯◊ÀÃ¨–ﬁ’˝”‡¡ø
-  707   2              speed_keep_total *= CURVE_OUTSIDE_SPEED_KEEP;
-  708   2          }
-  709   1      
-  710   1          // µ•¬ﬂº≠÷±µ¿º”ÀŸ£®ø…ø™πÿ£©
-  711   1          straight_boost_scale = 1.0f;
-  712   1          if (STRAIGHT_ACCEL_ENABLE == 1)
-  713   1          {
-  714   2              if ((track_state == TRACK_STRAIGHT) &&
-  715   2                  (straight_counter >= STRAIGHT_BOOST_STABLE_CYCLES) &&
-  716   2                  (abs_preview <= STRAIGHT_BOOST_PREVIEW_TH) &&
-  717   2                  (abs_offset <= STRAIGHT_BOOST_OFFSET_TH) &&
-  718   2                  (abs_gyro <= STRAIGHT_BOOST_GYRO_TH) &&
-  719   2                  (abs_f(preview_delta) <= STRAIGHT_BOOST_DPREVIEW_TH))
-  720   2              {
-  721   3                  straight_boost_scale = STRAIGHT_SPEED_BOOST;
-  722   3              }
-  723   2          }
-  724   1      
-  725   1          speed_keep_total *= straight_boost_scale;
-  726   1          speed_keep_total = clamp_f(speed_keep_total, TARGET_SCALE_MIN, TARGET_SCALE_MAX);
-  727   1      
-  728   1          base_pulses = (int)((float)(((long)target_speed_base * MAX_SPEED_PULSES) / 90) * BASE_SPEED_MATCH_GAI
+  554   1          speed_scale_total = clamp_f(speed_scale_total, SPEED_SCALE_MIN, SPEED_SCALE_MAX);
+  555   1      
+  556   1          base_pulses = (int)((float)(((long)target_speed_base * MAX_SPEED_PULSES) / 90) * BASE_SPEED_MATCH_GAI
              -N);
-  729   1          target_pulses_des = (int)((float)base_pulses * speed_keep_total);
-  730   1      
-  731   1          target_pulses_min = (int)((float)base_pulses * TARGET_SCALE_MIN);
-  732   1          target_pulses_max = (int)((float)base_pulses * TARGET_SCALE_MAX);
-  733   1          if (target_pulses_des < target_pulses_min) target_pulses_des = target_pulses_min;
-  734   1          if (target_pulses_des > target_pulses_max) target_pulses_des = target_pulses_max;
-  735   1      
-  736   1          // ÀŸ∂»–±∆¬£∫Õ‰÷–¬˝…˝ÀŸ°¢»´≥ÃøÏΩµÀŸ
-  737   1          if (target_pulses_ramped <= 1.0f)
-  738   1          {
-  739   2              target_pulses_ramped = (float)target_pulses_des;
-  740   2          }
-  741   1      
-  742   1          if (track_state == TRACK_STRAIGHT)
-  743   1          {
-  744   2              accel_step_up = TARGET_STEP_UP_STRAIGHT;
-  745   2          }
-  746   1          else
-  747   1          {
-  748   2              accel_step_up = TARGET_STEP_UP_TURN;
-  749   2          }
-  750   1      
-  751   1          if ((float)target_pulses_des > target_pulses_ramped + accel_step_up)
-  752   1          {
-  753   2              target_pulses_ramped += accel_step_up;
-  754   2          }
-  755   1          else if ((float)target_pulses_des < target_pulses_ramped - TARGET_STEP_DOWN)
-  756   1          {
-  757   2              target_pulses_ramped -= TARGET_STEP_DOWN;
-  758   2          }
-  759   1          else
-  760   1          {
-  761   2              target_pulses_ramped = (float)target_pulses_des;
-  762   2          }
-  763   1      
-  764   1          target_pulses = (int)(target_pulses_ramped + 0.5f);
-  765   1          if (target_pulses < target_pulses_min) target_pulses = target_pulses_min;
-  766   1          if (target_pulses > target_pulses_max) target_pulses = target_pulses_max;
-  767   1      
-  768   1          // 10) ∫Û¬÷≤ÓÀŸ£∫∞¥◊¥Ã¨∏¯Œ¬∫Õ‘ˆ“Ê£¨≤¢◊ˆ…œœﬁ±£ª§
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 13  
+  557   1      
+  558   1          target_pulses_des = (int)((float)base_pulses * speed_scale_total);
+  559   1          target_pulses_min = (int)((float)base_pulses * SPEED_SCALE_MIN);
+  560   1          target_pulses_max = (int)((float)base_pulses * SPEED_SCALE_MAX);
+  561   1      
+  562   1          if (target_pulses_des < target_pulses_min) target_pulses_des = target_pulses_min;
+  563   1          if (target_pulses_des > target_pulses_max) target_pulses_des = target_pulses_max;
+  564   1      
+  565   1          if (target_pulses_ramped <= 1.0f)
+  566   1              target_pulses_ramped = (float)target_pulses_des;
+  567   1      
+  568   1          target_step_up = TARGET_STEP_UP_STRAIGHT - (TARGET_STEP_UP_STRAIGHT - TARGET_STEP_UP_CURVE_MIN) * cur
+             -ve_intensity;
+  569   1          if (target_step_up < TARGET_STEP_UP_CURVE_MIN) target_step_up = TARGET_STEP_UP_CURVE_MIN;
+  570   1      
+  571   1          if ((float)target_pulses_des > target_pulses_ramped + target_step_up)
+  572   1              target_pulses_ramped += target_step_up;
+  573   1          else if ((float)target_pulses_des < target_pulses_ramped - TARGET_STEP_DOWN)
+  574   1              target_pulses_ramped -= TARGET_STEP_DOWN;
+  575   1          else
+  576   1              target_pulses_ramped = (float)target_pulses_des;
+  577   1      
+  578   1          target_pulses = (int)(target_pulses_ramped + 0.5f);
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 10  
 
-  769   1          abs_steer = abs_f(steer_out);
-  770   1      
-  771   1          switch (track_state)
-  772   1          {
-  773   2          case TRACK_STRAIGHT:
-  774   2              diff_k = DIFF_K_STRAIGHT;
-  775   2              break;
-  776   2          case TRACK_ENTRY:
-  777   2              diff_k = DIFF_K_ENTRY;
-  778   2              break;
-  779   2          case TRACK_APEX:
-  780   2              diff_k = DIFF_K_APEX;
-  781   2              break;
-  782   2          case TRACK_EXIT:
-  783   2              diff_k = DIFF_K_EXIT;
-  784   2              break;
-  785   2          default:
-  786   2              diff_k = DIFF_K_RECOVERY;
-  787   2              break;
-  788   2          }
-  789   1      
-  790   1          if (abs_steer < 2.0f)
-  791   1          {
-  792   2              diff_k *= 0.30f;
-  793   2          }
-  794   1          if (outside_drift)
-  795   1          {
-  796   2              diff_k *= DIFF_OUTSIDE_BOOST_MUL;
-  797   2          }
-  798   1      
-  799   1          diff_cmd = steer_out * diff_k;
-  800   1          diff_filtered = diff_filtered * (1.0f - DIFF_FILTER_ALPHA) + diff_cmd * DIFF_FILTER_ALPHA;
-  801   1          diff_speed = (int)diff_filtered;
-  802   1      
-  803   1          diff_cap = (int)((float)target_pulses * DIFF_MAX_CAP_RATIO);
-  804   1          if (diff_cap < DIFF_MIN_CAP) diff_cap = DIFF_MIN_CAP;
-  805   1          if (track_state == TRACK_STRAIGHT)
-  806   1          {
-  807   2              diff_cap = diff_cap / 2;
-  808   2              if (diff_cap < 8) diff_cap = 8;
-  809   2          }
-  810   1      
-  811   1          if (diff_speed > diff_cap) diff_speed = diff_cap;
-  812   1          else if (diff_speed < -diff_cap) diff_speed = -diff_cap;
-  813   1      
-  814   1          left_target_pulses = target_pulses + diff_speed;
-  815   1          right_target_pulses = target_pulses - diff_speed;
-  816   1      
-  817   1          // º±Õ‰ƒ⁄¬÷◊ÓµÕÀŸ∂»±£ª§£¨∑¿÷πƒ⁄¬÷±ª—πÀ¿∫Û≥µ…ÌΩ©”≤
-  818   1          if ((track_state != TRACK_STRAIGHT) &&
-  819   1              (abs_steer >= DIFF_INNER_MIN_STEER_TH) &&
-  820   1              (abs_preview >= DIFF_INNER_MIN_PREVIEW_TH))
-  821   1          {
-  822   2              inner_min_pulses = (int)((float)base_pulses * DIFF_INNER_MIN_RATIO);
-  823   2              if (inner_min_pulses < 1) inner_min_pulses = 1;
-  824   2      
-  825   2              if (left_target_pulses < right_target_pulses)
-  826   2              {
-  827   3                  if (left_target_pulses < inner_min_pulses) left_target_pulses = inner_min_pulses;
-  828   3              }
-  829   2              else
-  830   2              {
-  831   3                  if (right_target_pulses < inner_min_pulses) right_target_pulses = inner_min_pulses;
-  832   3              }
-  833   2          }
-  834   1      
-C251 COMPILER V5.60.0,  control                                                            22/04/26  16:39:19  PAGE 14  
+  579   1          if (target_pulses < target_pulses_min) target_pulses = target_pulses_min;
+  580   1          if (target_pulses > target_pulses_max) target_pulses = target_pulses_max;
+  581   1      
+  582   1          if (abs_steer <= DIFF_STEER_DEADBAND)
+  583   1          {
+  584   2              diff_cmd = 0.0f;
+  585   2          }
+  586   1          else
+  587   1          {
+  588   2              diff_gamma = diff_gamma_from_steer(abs_steer);
+  589   2              diff_gain = DIFF_GAIN_BASE + DIFF_GAIN_CURVE_ADD * curve_intensity;
+  590   2              diff_cmd = (float)target_pulses * diff_gamma * diff_gain;
+  591   2      
+  592   2              if (steer_out > 0.0f)
+  593   2                  diff_cmd *= DIFF_RIGHT_MUL;
+  594   2              else if (steer_out < 0.0f)
+  595   2                  diff_cmd = -diff_cmd * DIFF_LEFT_MUL;
+  596   2          }
+  597   1      
+  598   1          if (outside_drift)
+  599   1          {
+  600   2              diff_cmd *= DIFF_OUTSIDE_MUL;
+  601   2          }
+  602   1      
+  603   1          if (conf_scale < 0.55f)
+  604   1          {
+  605   2              diff_cmd *= 0.72f;
+  606   2          }
+  607   1      
+  608   1          diff_filtered = diff_filtered * (1.0f - DIFF_FILTER_ALPHA) + diff_cmd * DIFF_FILTER_ALPHA;
+  609   1          diff_step_limit = DIFF_STEP_BASE + DIFF_STEP_CURVE_ADD * curve_intensity;
+  610   1      
+  611   1          diff_delta = diff_filtered - diff_limited;
+  612   1          if (diff_delta > diff_step_limit)
+  613   1              diff_limited += diff_step_limit;
+  614   1          else if (diff_delta < -diff_step_limit)
+  615   1              diff_limited -= diff_step_limit;
+  616   1          else
+  617   1              diff_limited = diff_filtered;
+  618   1      
+  619   1          if (diff_limited >= 0.0f)
+  620   1              diff_speed = (int)(diff_limited + 0.5f);
+  621   1          else
+  622   1              diff_speed = (int)(diff_limited - 0.5f);
+  623   1      
+  624   1          diff_cap_ratio = DIFF_CAP_RATIO_BASE + DIFF_CAP_RATIO_CURVE_ADD * curve_intensity;
+  625   1          diff_cap = (int)((float)target_pulses * diff_cap_ratio);
+  626   1          if (diff_cap < DIFF_CAP_MIN) diff_cap = DIFF_CAP_MIN;
+  627   1      
+  628   1          if (diff_speed > diff_cap) diff_speed = diff_cap;
+  629   1          if (diff_speed < -diff_cap) diff_speed = -diff_cap;
+  630   1      
+  631   1          left_target_pulses = target_pulses + diff_speed;
+  632   1          right_target_pulses = target_pulses - diff_speed;
+  633   1      
+  634   1          if ((abs_steer >= DIFF_INNER_MIN_STEER_TH) && (curve_intensity >= DIFF_INNER_MIN_CURVE_TH))
+  635   1          {
+  636   2              inner_min_pulses = (int)((float)base_pulses * DIFF_INNER_MIN_RATIO);
+  637   2              if (inner_min_pulses < 1) inner_min_pulses = 1;
+  638   2      
+  639   2              if (left_target_pulses < right_target_pulses)
+  640   2              {
+  641   3                  if (left_target_pulses < inner_min_pulses) left_target_pulses = inner_min_pulses;
+  642   3              }
+  643   2              else
+  644   2              {
+C251 COMPILER V5.60.0,  control                                                            01/05/26  14:22:08  PAGE 11  
 
-  835   1          // 11) ±‡¬Î∆˜ + µÁª˙ PID
-  836   1          encoder_update();
-  837   1      
-  838   1          left_motor_speed_pid_calc(left_target_pulses, left_speed);
-  839   1          right_motor_speed_pid_calc(right_target_pulses, right_speed);
-  840   1      
-  841   1          set_motor_speed((int)left_motor_speedpid.output, (int)right_motor_speedpid.output);
-  842   1      
-  843   1          // ÷‹∆⁄¥Ú”°¥•∑¢
-  844   1          loop_cnt++;
-  845   1          if (loop_cnt >= 5)
-  846   1          {
-  847   2              loop_cnt = 0;
-  848   2              print_flag = 1;
-  849   2          }
-  850   1      }
+  645   3                  if (right_target_pulses < inner_min_pulses) right_target_pulses = inner_min_pulses;
+  646   3              }
+  647   2          }
+  648   1      
+  649   1          encoder_update();
+  650   1          left_motor_speed_pid_calc(left_target_pulses, left_speed);
+  651   1          right_motor_speed_pid_calc(right_target_pulses, right_speed);
+  652   1          set_motor_speed((int)left_motor_speedpid.output, (int)right_motor_speedpid.output);
+  653   1      
+  654   1          loop_cnt++;
+  655   1          if (loop_cnt >= 5)
+  656   1          {
+  657   2              loop_cnt = 0;
+  658   2              print_flag = 1;
+  659   2          }
+  660   1      }
+  661          
+  662          
+  663          
+  664          
+  665          
 
 
 Module Information          Static   Overlayable
 ------------------------------------------------
   code size            =    ------     ------
-  ecode size           =      6644     ------
+  ecode size           =      7238     ------
   data size            =    ------     ------
   idata size           =    ------     ------
   pdata size           =    ------     ------
-  xdata size           =       277     ------
+  xdata size           =       301     ------
   xdata-const size     =    ------     ------
   edata size           =    ------     ------
   bit size             =    ------     ------
@@ -919,7 +720,7 @@ Module Information          Static   Overlayable
   far data size        =    ------     ------
   huge data size       =    ------     ------
   const size           =    ------     ------
-  hconst size          =       215     ------
+  hconst size          =       247     ------
 End of Module Information.
 
 

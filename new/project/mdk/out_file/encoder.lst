@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  encoder                                                            22/04/26  16:39:19  PAGE 1   
+C251 COMPILER V5.60.0,  encoder                                                            01/05/26  14:22:07  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE encoder
@@ -66,7 +66,7 @@ stmt  level    source
    54          
    55          //// 【新增】根据你实测的数据，定义最大脉冲数
    56          //#define MAX_SPEED_PULSES 2000  
-C251 COMPILER V5.60.0,  encoder                                                            22/04/26  16:39:19  PAGE 2   
+C251 COMPILER V5.60.0,  encoder                                                            01/05/26  14:22:07  PAGE 2   
 
    57          
    58          //// 编码器引脚定义 (保持你的原样)

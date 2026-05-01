@@ -57,18 +57,10 @@ typedef struct
 extern PID left_motor_speedpid; 
 extern PID right_motor_speedpid;
 
-extern PID left_motor_speedpid;
-extern PID right_motor_speedpid;
-
-// 【修复点】将底层核心计算函数暴露给 main.c 
 void PID_Init(PID *pid, float p, float i, float d, int maxI, int maxOut);
 void PID_Calc(PID *pid, int reference, int feedback);
 
 // 速度环初始化函数
-void left_motor_speed_pid_init(float p, float i, float d, int maxI, int maxOut);
-void right_motor_speed_pid_init(float p, float i, float d, int maxI, int maxOut);
-
-
 void left_motor_speed_pid_init(float p, float i, float d, int maxI, int maxOut);
 void right_motor_speed_pid_init(float p, float i, float d, int maxI, int maxOut);
 void left_motor_speed_pid_calc(int speed, int speed_fd);
@@ -76,3 +68,4 @@ void right_motor_speed_pid_calc(int speed, int speed_fd);
 
 
 #endif /* CODE_PID_H_ */
+

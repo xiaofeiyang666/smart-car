@@ -26,33 +26,45 @@ void PID_Init(PID *pid, float p, float i, float d, int maxI, int maxOut)
 //参数为(pid结构体,目标值,反馈值)，计算结果放在pid结构体的output成员中
 void PID_Calc(PID *pid, int reference, int feedback)
 {
-    int dout;
-    int pout;
+    float dout;
+    float pout;
+    float integral_next;
+    float output_next;
 
     //更新数据
     pid->lastError = pid->error; //将旧error存起来
-    pid->error = reference - feedback; //计算新error
-	
+    pid->error = (float)(reference - feedback); //计算新error
 
-    
-    //计算微分 (现在只赋值，不声明)
     dout = (pid->error - pid->lastError) * pid->kd;
-    
-    //计算比例 (现在只赋值，不声明)
     pout = pid->error * pid->kp;
-    
-    //计算积分
-    pid->integral += pid->error * pid->ki;
-    
-    //积分限幅
-    if(pid->integral > pid->maxIntegral) pid->integral = pid->maxIntegral;
-    else if(pid->integral < -pid->maxIntegral) pid->integral = -pid->maxIntegral;
-    
-    //计算输出
-    pid->output = pout + dout + pid->integral;
-    //输出限幅
-    if(pid->output > pid->maxOutput) pid->output =   pid->maxOutput;
-    else if(pid->output < -pid->maxOutput) pid->output = -pid->maxOutput;
+
+    integral_next = pid->integral + pid->error * pid->ki;
+    if(integral_next > pid->maxIntegral) integral_next = pid->maxIntegral;
+    else if(integral_next < -pid->maxIntegral) integral_next = -pid->maxIntegral;
+
+    output_next = pout + dout + integral_next;
+
+    if(output_next > pid->maxOutput)
+    {
+        pid->output = pid->maxOutput;
+        if(pid->error < 0.0f)
+        {
+            pid->integral = integral_next;
+        }
+    }
+    else if(output_next < -pid->maxOutput)
+    {
+        pid->output = -pid->maxOutput;
+        if(pid->error > 0.0f)
+        {
+            pid->integral = integral_next;
+        }
+    }
+    else
+    {
+        pid->integral = integral_next;
+        pid->output = output_next;
+    }
 }
 //-------------------------------------------------------------------------------------------------------------------
 // 函数简介     左电机pid初始化
