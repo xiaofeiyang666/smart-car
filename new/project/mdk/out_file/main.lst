@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  main                                                               01/05/26  14:22:09  PAGE 1   
+C251 COMPILER V5.60.0,  main                                                               02/05/26  18:20:08  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE main
@@ -20,9 +20,9 @@ stmt  level    source
     8          #include "pid.h"
     9          #include "brushless.h"
    10          
-   11          // ´®¿Úµ÷ÊÔ¿ª¹Ø£º0=¹Ø±Õ£¨ÌáÉýÐÔÄÜ£©£¬1=¿ªÆô£¨Êä³öfps/off/pre£©
+   11          // ä¸²å£è°ƒè¯•å¼€å…³ï¼š0=å…³é—­ï¼ˆæå‡æ€§èƒ½ï¼‰ï¼Œ1=å¼€å¯ï¼ˆè¾“å‡ºfps/off/preï¼‰
    12          #define UART_DEBUG_PRINT_ENABLE    1
-   13          // ¿ªÆôµ÷ÊÔÊ±µÄ·ÖÆµ£ºÃ¿N´Îprint_flagÊä³öÒ»´Î£¬¼õÐ¡´®¿Ú×èÈû
+   13          // å¼€å¯è°ƒè¯•æ—¶çš„åˆ†é¢‘ï¼šæ¯Næ¬¡print_flagè¾“å‡ºä¸€æ¬¡ï¼Œå‡å°ä¸²å£é˜»å¡ž
    14          #define UART_DEBUG_PRINT_DIV       5
    15          
    16          void main(void)
@@ -35,7 +35,7 @@ stmt  level    source
    23   1          clock_init(SYSTEM_CLOCK_96M);
    24   1          debug_init();
    25   1      
-   26   1          // Ó²¼þ³õÊ¼»¯
+   26   1          // ç¡¬ä»¶åˆå§‹åŒ–
    27   1          motor_init();
    28   1          encoder_init();
    29   1          servo_init();
@@ -45,16 +45,16 @@ stmt  level    source
    33   1          imu660ra_init();
    34   1      
    35   1      #if UART_DEBUG_PRINT_ENABLE
-   36   1          // ¿ªÆôÎÞÏß´®¿Ú£¬±ãÓÚÊµÊ±²é¿´fpsºÍÆ«²î
+   36   1          // å¼€å¯æ— çº¿ä¸²å£ï¼Œä¾¿äºŽå®žæ—¶æŸ¥çœ‹fpså’Œåå·®
    37   1          wireless_uart_init();
    38   1      #endif
    39   1      
-   40   1          // ÉãÏñÍ·³õÊ¼»¯
+   40   1          // æ‘„åƒå¤´åˆå§‹åŒ–
    41   1          camara_init();
    42   1      
-   43   1          // ¿ØÖÆ»·20ms
+   43   1          // æŽ§åˆ¶çŽ¯20ms
    44   1          pit_ms_init(TIM0_PIT, 20, control_loop);
-   45   1          // 1ms½ÚÅÄÓÃÓÚÍ³¼Æcurrent_fps
+   45   1          // 1msèŠ‚æ‹ç”¨äºŽç»Ÿè®¡current_fps
    46   1          pit_ms_init(TIM1_PIT, 1, my_fps_timer_callback);
    47   1      
    48   1          EA = 1;
@@ -63,10 +63,10 @@ stmt  level    source
    51   1          {
    52   2              camara_task();
    53   2      
-   54   2              // print_flag´óÔ¼100ms´¥·¢Ò»´Î
+   54   2              // print_flagå¤§çº¦100msè§¦å‘ä¸€æ¬¡
    55   2              if (print_flag)
    56   2              {
-C251 COMPILER V5.60.0,  main                                                               01/05/26  14:22:09  PAGE 2   
+C251 COMPILER V5.60.0,  main                                                               02/05/26  18:20:08  PAGE 2   
 
    57   3                  print_flag = 0;
    58   3      
@@ -75,22 +75,23 @@ stmt  level    source
    61   3                  if (uart_dbg_div >= UART_DEBUG_PRINT_DIV)
    62   3                  {
    63   4                      uart_dbg_div = 0;
-   64   4                      sprintf(debug_str, "fps=%u,off=%d,pre=%d\r\n", current_fps, camera_bias_raw, camera_previ
-             -ew_raw);
-   65   4                      wireless_uart_send_string(debug_str);
-   66   4                  }
-   67   3      #endif
-   68   3              }
-   69   2          }
-   70   1      }
-   71          
-   72          
+   64   4                      sprintf(debug_str, "fps=%u,off=%d,pre=%d,far=%d,cur=%d,mode=%u,conf=%u\r\n",
+   65   4                              current_fps, camera_bias_raw, camera_preview_raw, camera_preview_far_raw,
+   66   4                              camera_curve_raw, camera_route_mode, camera_confidence);
+   67   4                      wireless_uart_send_string(debug_str);
+   68   4                  }
+   69   3      #endif
+   70   3              }
+   71   2          }
+   72   1      }
+   73          
+   74          
 
 
 Module Information          Static   Overlayable
 ------------------------------------------------
   code size            =    ------     ------
-  ecode size           =       337     ------
+  ecode size           =       386     ------
   data size            =    ------     ------
   idata size           =    ------     ------
   pdata size           =    ------     ------
@@ -104,7 +105,7 @@ Module Information          Static   Overlayable
   far data size        =    ------     ------
   huge data size       =    ------     ------
   const size           =    ------     ------
-  hconst size          =        25     ------
+  hconst size          =        55     ------
 End of Module Information.
 
 

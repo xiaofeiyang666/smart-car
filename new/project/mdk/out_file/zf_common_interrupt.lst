@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  zf_common_interrupt                                                01/05/26  14:22:03  PAGE 1   
+C251 COMPILER V5.60.0,  zf_common_interrupt                                                02/05/26  18:20:03  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE zf_common_interrupt
@@ -66,7 +66,7 @@ stmt  level    source
    49   1        if((irqn >> 4) == 0)
    50   1        {
    51   2          IP  |= (priority & 0x01) << (irqn & 0x0F);
-C251 COMPILER V5.60.0,  zf_common_interrupt                                                01/05/26  14:22:03  PAGE 2   
+C251 COMPILER V5.60.0,  zf_common_interrupt                                                02/05/26  18:20:03  PAGE 2   
 
    52   2          IPH |= ((priority >> 1) & 0x01) << (irqn & 0x0F);
    53   2        }
@@ -134,7 +134,7 @@ stmt  level    source
              -------------
   112          void interrupt_global_enable(void)
   113          {
-C251 COMPILER V5.60.0,  zf_common_interrupt                                                01/05/26  14:22:03  PAGE 3   
+C251 COMPILER V5.60.0,  zf_common_interrupt                                                02/05/26  18:20:03  PAGE 3   
 
   114   1          EA = 1;
   115   1      }

@@ -1,4 +1,4 @@
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 1   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 1   
 
 
 C251 COMPILER V5.60.0, COMPILATION OF MODULE zf_common_function
@@ -66,7 +66,7 @@ stmt  level    source
              -------------
    49          uint32 func_get_greatest_common_divisor (uint32 num1, uint32 num2)
    50          {
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 2   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 2   
 
    51   1          while(num1 != num2)
    52   1          {
@@ -134,7 +134,7 @@ stmt  level    source
   110   3              }
   111   2      
   112   2              if(sign)
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 3   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 3   
 
   113   2              {
   114   3                  temp = -temp;
@@ -202,7 +202,7 @@ stmt  level    source
   170          // Ê¹ÓÃÊ¾Àý     uint32 dat = func_str_to_uint("100");
   171          // ±¸×¢ÐÅÏ¢     
   172          //-------------------------------------------------------------------------------------------------------
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 4   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 4   
 
              -------------
   173          uint32 func_str_to_uint (char *str)
@@ -270,7 +270,7 @@ stmt  level    source
              -Ðµ¹ÐòÈ¡³ö ±ä³ÉÕýÐò·ÅÈë×Ö·û´®
   231   3                  temp_bit --;
   232   3              }
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 5   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 5   
 
   233   2          }while(0);
   234   1      }
@@ -338,7 +338,7 @@ stmt  level    source
   293   1          return temp;
   294   1      }
   295          
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 6   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 6   
 
   296          //-------------------------------------------------------------------------------------------------------
              -------------
@@ -406,7 +406,7 @@ stmt  level    source
   353   3                  *str ++ = (func_abs(data_temp[temp_bit - 1]) + 0x30);                    // ÔÙµ¹Ðò½«µ¹ÐòµÄÊýÖ
              -µÐ´Èë×Ö·û´® µÃµ½ÕýÐòÊýÖµ
   354   3                  temp_bit --;
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 7   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 7   
 
   355   3              }
   356   2      
@@ -474,7 +474,7 @@ stmt  level    source
   414   3                  str ++;
   415   3              }
   416   2      
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 8   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 8   
 
   417   2              // ÌáÈ¡ÕûÊý²¿·Ö
   418   2              while(('0' <= *str) && ('9' >= *str))                                   // È·¶¨ÕâÊÇ¸öÊý×Ö
@@ -542,7 +542,7 @@ stmt  level    source
   475   3                  *str ++ = '-';
   476   3              }
   477   2              else if(0.0 == number)                                                  // Èç¹ûÊÇ¸ö 0
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 9   
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 9   
 
   478   2              {
   479   3                  *str ++ = '0';
@@ -610,7 +610,7 @@ stmt  level    source
   535          // Ê¹ÓÃÊ¾Àý     uint32 dat = func_str_to_hex("0x11");
   536          // ±¸×¢ÐÅÏ¢     
   537          //-------------------------------------------------------------------------------------------------------
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 10  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 10  
 
              -------------
   538          uint32 func_str_to_hex (char *str)
@@ -678,7 +678,7 @@ stmt  level    source
   597          void func_hex_to_str (char *str, uint32 number)
   598          {
   599   1          const char hex_index[16] = {
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 11  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 11  
 
   600   1              '0', '1', '2', '3',
   601   1              '4', '5', '6', '7',
@@ -746,7 +746,7 @@ stmt  level    source
   658   2              {
   659   3                  neg_dat = -neg_dat;
   660   3              }
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 12  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 12  
 
   661   2              while(1)
   662   2              {
@@ -814,7 +814,7 @@ stmt  level    source
   722   1      }
   723          
   724          
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 13  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 13  
 
   725          
   726          //-------------------------------------------------------------------------------------------------------
@@ -882,7 +882,7 @@ stmt  level    source
   786   4                      } while (num > 0 && len < (int)sizeof(temp) - 1);
   787   3      
   788   3                      /* Ìí¼Ó¸ººÅ */
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 14  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 14  
 
   789   3                      if (is_negative) 
   790   3              {
@@ -950,7 +950,7 @@ stmt  level    source
   852   3                      break;
   853   3      
   854   3                  default:
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 15  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 15  
 
   855   3                      *ptr++ = *format;
   856   3                      i++;
@@ -1018,7 +1018,7 @@ stmt  level    source
   916   5                              buff += vlen;
   917   5                              buff_len += vlen;
   918   5                          }
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 16  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 16  
 
   919   4                          break;
   920   4      
@@ -1086,7 +1086,7 @@ stmt  level    source
   982   5                              uint8 vlen = number_conversion_ascii(ival, vstr, 0, 8);
   983   5      
   984   5                              printf_reverse_order(vstr, vlen);
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 17  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 17  
 
   985   5                              memcpy(buff, vstr, vlen);
   986   5                              buff += vlen;
@@ -1154,7 +1154,7 @@ stmt  level    source
  1048   3                  buff_len ++;
  1049   3              }
  1050   2              format ++;
-C251 COMPILER V5.60.0,  zf_common_function                                                 01/05/26  14:22:03  PAGE 18  
+C251 COMPILER V5.60.0,  zf_common_function                                                 02/05/26  18:20:03  PAGE 18  
 
  1051   2          }
  1052   1          va_end(arg);

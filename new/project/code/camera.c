@@ -1,71 +1,34 @@
 #include "camera.h"
 #include "zf_common_headfile.h"
 
-// ===================== ¿Éµ÷²ÎÊý£¨ÊÓ¾õ²ã£© =====================
-#define CAMERA_DEBUG_DRAW_ENABLE         0   // 0=¹Ø±ÕÏÔÊ¾ÌáÖ¡ÂÊ£¬1=¿ªÆôÏÔÊ¾±ãÓÚµ÷ÊÔ
-#define CAMERA_DEBUG_DRAW_INTERVAL       6
+/* å¼€æºé£Žæ ¼è§†è§‰æµç¨‹ï¼š
+ * é˜ˆå€¼äºŒå€¼åˆ¤æ–­ -> è‡ªåº•å‘ä¸Šæ‰«å·¦å³è¾¹ç•Œ -> å–ä¸­çº¿ -> å›ºå®šè¡Œæ®µç®—åå·®ã€‚
+ */
+#define CAMERA_DEBUG_DRAW_ENABLE      0
+#define CAMERA_DEBUG_DRAW_INTERVAL    6
 
-// ÐÔÄÜµµÎ»£º0=ÎÈ½¡£¬1=¾ùºâ£¬2=¸ßÖ¡ÂÊ£¨ÍÆ¼ö£©
-#define CAMERA_PERF_PROFILE              2
+#define IMAGE_BLACK                   0
+#define IMAGE_WHITE                   255
+#define BORDER_BIAS                   1
 
-#if (CAMERA_PERF_PROFILE == 0)
-#define CAMERA_LOCAL_RANGE_MIN           14
-#define CAMERA_LOCAL_RANGE_MAX           36
-#define CAMERA_GLOBAL_RESCAN_NEAR_ROW    96
-#define CAMERA_ROW_STEP                  2
-#define CAMERA_MID_FILT_ALPHA_PCT        72
-#define CAMERA_FINAL_MID_STEP_MIN        4
-#define CAMERA_FINAL_MID_STEP_MAX        16
-#define CAMERA_RESCAN_STREAK_TH          1
-#define CAMERA_RESCAN_FORCE_NEAR_ROW     114
-#define CAMERA_RESCAN_CONF_TH            50
-#elif (CAMERA_PERF_PROFILE == 1)
-#define CAMERA_LOCAL_RANGE_MIN           12
-#define CAMERA_LOCAL_RANGE_MAX           32
-#define CAMERA_GLOBAL_RESCAN_NEAR_ROW    106
-#define CAMERA_ROW_STEP                  2
-#define CAMERA_MID_FILT_ALPHA_PCT        70
-#define CAMERA_FINAL_MID_STEP_MIN        5
-#define CAMERA_FINAL_MID_STEP_MAX        17
-#define CAMERA_RESCAN_STREAK_TH          2
-#define CAMERA_RESCAN_FORCE_NEAR_ROW     116
-#define CAMERA_RESCAN_CONF_TH            45
-#else
-#define CAMERA_LOCAL_RANGE_MIN           12  // ËõÐ¡¾Ö²¿ËÑË÷´°¿Ú
-#define CAMERA_LOCAL_RANGE_MAX           28
-#define CAMERA_GLOBAL_RESCAN_NEAR_ROW    112 // È«¾Ö²¹É¨Ö»±£Áô×î¿¿½ü³µÌåµÄÇøÓò
-#define CAMERA_ROW_STEP                  3   // °´3ÐÐ´¦Àí£¬Ö¡ÂÊÌáÉý×îÃ÷ÏÔ
-#define CAMERA_MID_FILT_ALPHA_PCT        66
-#define CAMERA_FINAL_MID_STEP_MIN        6
-#define CAMERA_FINAL_MID_STEP_MAX        18
-#define CAMERA_RESCAN_STREAK_TH          2   // Á¬Ðø¶ªÏß²Å´¥·¢È«¾Ö²¹É¨
-#define CAMERA_RESCAN_FORCE_NEAR_ROW     116 // ×î½ü³¡ÈÔÇ¿ÖÆ²¹É¨£¬·ÀÖ¹Ìù±ßÂ©¼ì
-#define CAMERA_RESCAN_CONF_TH            45
-#endif
+#define CAMERA_ROW_STEP               3
+#define CAMERA_THRESHOLD_UPDATE_DIV   3
+#define CAMERA_THRESHOLD_ROW_STEP     4
+#define CAMERA_THRESHOLD_COL_STEP     4
+#define CAMERA_BIAS_START_LINE        70
+#define CAMERA_BIAS_END_LINE          50
+#define CAMERA_PREVIEW_NEAR_ROW       (MT9V03X_H - 15)
+#define CAMERA_PREVIEW_MID_ROW        55
+#define CAMERA_PREVIEW_FAR_ROW        30
+#define CAMERA_AVG_RADIUS             2
+#define CAMERA_MIN_BIAS_ROWS          5
 
-#define CAMERA_EDGE_GRAD_TH              24  // »Ò¶ÈÌÝ¶ÈãÐÖµ£ºÔ½´óÔ½¿¹Ôë£¬Ô½Ð¡Ô½ÁéÃô
-#define CAMERA_EDGE_STEP_TH              10  // ÁÚÓòÁÁ¶ÈÌø±äãÐÖµ£ºÔ½´óÔ½±£ÊØ
-#define CAMERA_EDGE_SPAN_TH              20  // ¾Ö²¿¶Ô±È¶ÈãÐÖµ£ºÒÖÖÆµÍÎÆÀíÇøÓòÎó¼ì
-#define CAMERA_EDGE_BIAS_TH              6   // ÁÁ°µÆ«ÖÃãÐÖµ£º¹ýÂËÎ±±ßÔµ
-#define CAMERA_TOP_THRESHOLD_GAIN        14  // ½öµ÷ÊÔÍ¼´«¶þÖµ»¯Ê¹ÓÃ
+#define WIFI_SSID_TEST                "Car"
+#define WIFI_PASSWORD_TEST            "431431431"
+#define WIFI_BOUNDARY_ENABLE          1
+#define CAMERA_BINARY_OUTPUT_ENABLE   ((CAMERA_DEBUG_DRAW_ENABLE == 1) || (IPS200_OR_WIFI == 1))
+#define PIXEL_IS_WHITE_FAST(row, col) (mt9v03x_image[(row)][(col)] > img_threshold)
 
-#define CAMERA_WIDTH_MIN                 18
-#define CAMERA_WIDTH_MAX                 (MT9V03X_W - 4)
-#define CAMERA_EDGE_MIN_GAP              8
-
-#define CAMERA_GLOBAL_RESCAN_ENABLE      1   // 1=¾Ö²¿¶ªÏßºóÆôÓÃÈ«ÐÐ²¹É¨
-
-#define CAMERA_WIDTH_FILT_ALPHA_PCT      24
-#define CAMERA_MID_SEED_BLEND_NUM        2   // mid_seed = (a*old + new)/(a+1)
-
-#define CAMERA_NEAR_ROW                  (MT9V03X_H - 5)
-
-#define WIFI_SSID_TEST                   "Car"
-#define WIFI_PASSWORD_TEST               "431431431"
-#define WIFI_BOUNDARY_ENABLE             1
-#define CAMERA_BINARY_OUTPUT_ENABLE      ((CAMERA_DEBUG_DRAW_ENABLE == 1) || (IPS200_OR_WIFI == 1))
-
-// ===================== È«¾ÖÊä³ö =====================
 uint8 img_threshold = 120;
 uint8 left_jidian = 1;
 uint8 right_jidian = MT9V03X_W - 2;
@@ -76,20 +39,25 @@ uint8 final_mid_line = MID_W;
 
 int16 camera_bias_raw = 0;
 int16 camera_preview_raw = 0;
+int16 camera_preview_far_raw = 0;
+int16 camera_curve_raw = 0;
+uint8 camera_route_mode = 0;
 uint8 camera_valid_line_cnt = 0;
 uint8 camera_lost_left_cnt = 0;
 uint8 camera_lost_right_cnt = 0;
 uint8 camera_confidence = 0;
 
-// ===================== Ä£¿éÄÚ²¿±äÁ¿ =====================
+volatile uint16 current_fps = 0;
+volatile uint16 fps_counter = 0;
+
 #if CAMERA_BINARY_OUTPUT_ENABLE
 static uint8 bin_image[MT9V03X_H][MT9V03X_W];
 #endif
-static int final_mid_filtered_x8 = MID_W * 8;
-static uint8 final_mid_init = 0;
 
-volatile uint16 current_fps = 0;
-volatile uint16 fps_counter = 0;
+static uint8 scan_mid = MID_W;
+static int last_bias_mid = MID_W;
+static int16 last_slope_x10 = 0;
+
 #if CAMERA_DEBUG_DRAW_ENABLE
 static uint8 skip_draw = 0;
 #endif
@@ -106,101 +74,114 @@ static int clamp_i(int x, int min_v, int max_v)
     return x;
 }
 
-static uint8 is_left_transition(int row, int x)
+static int sign_i(int x)
 {
-    int g0, g1, g2, g3, g4;
-    int local_min;
-    int local_max;
-    int grad;
-    int step;
-    int grad_th;
-
-    if (x < 2 || x > MT9V03X_W - 3) return 0;
-
-    g0 = (int)mt9v03x_image[row][x - 2];
-    g1 = (int)mt9v03x_image[row][x - 1];
-    g2 = (int)mt9v03x_image[row][x];
-    g3 = (int)mt9v03x_image[row][x + 1];
-    g4 = (int)mt9v03x_image[row][x + 2];
-
-    local_min = g0;
-    if (g1 < local_min) local_min = g1;
-    if (g2 < local_min) local_min = g2;
-    if (g3 < local_min) local_min = g3;
-    if (g4 < local_min) local_min = g4;
-
-    local_max = g0;
-    if (g1 > local_max) local_max = g1;
-    if (g2 > local_max) local_max = g2;
-    if (g3 > local_max) local_max = g3;
-    if (g4 > local_max) local_max = g4;
-
-    if ((local_max - local_min) < CAMERA_EDGE_SPAN_TH) return 0;
-
-    grad_th = CAMERA_EDGE_GRAD_TH;
-    if (row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) grad_th -= 2;
-    if (row <= 32) grad_th += 2;
-    if (grad_th < 12) grad_th = 12;
-
-    grad = (g2 + g3) - (g0 + g1);
-    step = g2 - g1;
-
-    if ((grad >= grad_th) &&
-        (step >= CAMERA_EDGE_STEP_TH) &&
-        ((g2 - local_min) >= CAMERA_EDGE_BIAS_TH))
-    {
-        return 1;
-    }
+    if (x > 0) return 1;
+    if (x < 0) return -1;
     return 0;
 }
 
-static uint8 is_right_transition(int row, int x)
+static uint8 pixel_is_white(int row, int col)
 {
-    int g0, g1, g2, g3, g4;
-    int local_min;
-    int local_max;
-    int grad;
-    int step;
-    int grad_th;
-
-    if (x < 2 || x > MT9V03X_W - 3) return 0;
-
-    g0 = (int)mt9v03x_image[row][x - 2];
-    g1 = (int)mt9v03x_image[row][x - 1];
-    g2 = (int)mt9v03x_image[row][x];
-    g3 = (int)mt9v03x_image[row][x + 1];
-    g4 = (int)mt9v03x_image[row][x + 2];
-
-    local_min = g0;
-    if (g1 < local_min) local_min = g1;
-    if (g2 < local_min) local_min = g2;
-    if (g3 < local_min) local_min = g3;
-    if (g4 < local_min) local_min = g4;
-
-    local_max = g0;
-    if (g1 > local_max) local_max = g1;
-    if (g2 > local_max) local_max = g2;
-    if (g3 > local_max) local_max = g3;
-    if (g4 > local_max) local_max = g4;
-
-    if ((local_max - local_min) < CAMERA_EDGE_SPAN_TH) return 0;
-
-    grad_th = CAMERA_EDGE_GRAD_TH;
-    if (row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) grad_th -= 2;
-    if (row <= 32) grad_th += 2;
-    if (grad_th < 12) grad_th = 12;
-
-    grad = (g0 + g1) - (g2 + g3);
-    step = g1 - g2;
-
-    if ((grad >= grad_th) &&
-        (step >= CAMERA_EDGE_STEP_TH) &&
-        ((local_max - g2) >= CAMERA_EDGE_BIAS_TH))
-    {
-        return 1;
-    }
-    return 0;
+    row = clamp_i(row, 0, MT9V03X_H - 1);
+    col = clamp_i(col, 0, MT9V03X_W - 1);
+    return PIXEL_IS_WHITE_FAST(row, col) ? 1 : 0;
 }
+
+static uint8 otsu_threshold(void)
+{
+    static uint16 hist[256];
+    uint16 row;
+    uint16 col;
+    uint16 i;
+    uint32 total;
+    uint32 sum_all;
+    uint32 sum_back;
+    uint32 weight_back;
+    uint32 weight_fore;
+    uint8 threshold;
+    float mean_back;
+    float mean_fore;
+    float diff;
+    float variance;
+    float max_variance;
+
+    for (i = 0; i < 256; i++)
+    {
+        hist[i] = 0;
+    }
+
+    total = 0;
+    for (row = 0; row < MT9V03X_H; row += CAMERA_THRESHOLD_ROW_STEP)
+    {
+        for (col = 0; col < MT9V03X_W; col += CAMERA_THRESHOLD_COL_STEP)
+        {
+            hist[mt9v03x_image[row][col]]++;
+            total++;
+        }
+    }
+
+    if (total == 0)
+    {
+        return img_threshold;
+    }
+
+    sum_all = 0;
+    for (i = 0; i < 256; i++)
+    {
+        sum_all += (uint32)i * (uint32)hist[i];
+    }
+
+    threshold = img_threshold;
+    sum_back = 0;
+    weight_back = 0;
+    max_variance = 0.0f;
+
+    for (i = 0; i < 256; i++)
+    {
+        weight_back += hist[i];
+        if (weight_back == 0)
+        {
+            continue;
+        }
+
+        weight_fore = total - weight_back;
+        if (weight_fore == 0)
+        {
+            break;
+        }
+
+        sum_back += (uint32)i * (uint32)hist[i];
+        mean_back = (float)sum_back / (float)weight_back;
+        mean_fore = (float)(sum_all - sum_back) / (float)weight_fore;
+        diff = mean_back - mean_fore;
+        variance = (float)weight_back * (float)weight_fore * diff * diff;
+
+        if (variance > max_variance)
+        {
+            max_variance = variance;
+            threshold = (uint8)i;
+        }
+    }
+
+    return threshold;
+}
+
+#if CAMERA_BINARY_OUTPUT_ENABLE
+static void make_binary_snapshot(void)
+{
+    uint16 row;
+    uint16 col;
+
+    for (row = 0; row < MT9V03X_H; row++)
+    {
+        for (col = 0; col < MT9V03X_W; col++)
+        {
+            bin_image[row][col] = PIXEL_IS_WHITE_FAST(row, col) ? IMAGE_WHITE : IMAGE_BLACK;
+        }
+    }
+}
+#endif
 
 void mark_frame_processed(void)
 {
@@ -210,6 +191,7 @@ void mark_frame_processed(void)
 void my_fps_timer_callback(void)
 {
     static uint16 time_ms = 0;
+
     time_ms++;
     if (time_ms >= 1000)
     {
@@ -219,500 +201,382 @@ void my_fps_timer_callback(void)
     }
 }
 
-// »Ò¶È¿ìÕÕ+¶þÖµ¿ìÕÕ£º½öÓÃÓÚµ÷ÊÔÏÔÊ¾/Í¼´«£¬²»²ÎÓëÖ÷Ñ°Ïß
-#if CAMERA_BINARY_OUTPUT_ENABLE
-static void make_binary_snapshot(void)
+static void scan_one_row(int row, int *mid_io, int *left_out, int *right_out,
+                         uint8 *left_ok, uint8 *right_ok)
 {
-    uint16 y, x;
-    uint8 th_top;
-    uint8 th_bot;
-    uint16 top_end;
-    uint8 th;
-    uint8 g;
+    int col;
+    int mid;
+    uint8 flag_l;
+    uint8 flag_r;
 
-    th_bot = img_threshold;
-    th_top = (img_threshold > (255 - CAMERA_TOP_THRESHOLD_GAIN)) ? 255 : (img_threshold + CAMERA_TOP_THRESHOLD_GAIN);
-    top_end = MT9V03X_H / 3;
+    mid = clamp_i(*mid_io, 1, MT9V03X_W - 2);
+    flag_l = 0;
+    flag_r = 0;
+    *left_out = 0;
+    *right_out = MT9V03X_W - 1;
 
-    for (y = 0; y < MT9V03X_H; y++)
+    if (!PIXEL_IS_WHITE_FAST(row, mid))
     {
-        th = (y < top_end) ? th_top : th_bot;
-        for (x = 0; x < MT9V03X_W; x++)
+        for (col = mid; col - BORDER_BIAS > 0; col--)
         {
-            g = mt9v03x_image[y][x];
-            bin_image[y][x] = (g >= th) ? 255 : 0;
-        }
-    }
-
-}
-#endif
-
-// ¸ù¾ÝÐÐºÅ¹À¼ÆÈüµÀ°ë¿í£¨½ü´¦¸ü¿í£¬Ô¶´¦¸üÕ­£©
-static int estimate_half_width(int row)
-{
-    int num;
-    int den;
-    int val;
-
-    den = (search_start_line - search_end_line);
-    if (den <= 0) den = 1;
-
-    num = (row - search_end_line);
-    if (num < 0) num = 0;
-    if (num > den) num = den;
-
-    // Ô¶´¦Ô¼44£¬½ü´¦Ô¼78
-    val = 44 + (34 * num) / den;
-    val = clamp_i(val, 42, 80);
-    return val;
-}
-
-// ¾Ö²¿´°¿ÚÕÒ×ó±ßÔµ£ºÓÅÏÈÌù½üref_x£¬¼õÐ¡Ìø±ä
-static int find_left_edge_local(int row, int ref_x, int range)
-{
-    int x;
-    int start_x;
-    int end_x;
-    int best_x;
-    int best_dist;
-    int dist;
-
-    start_x = clamp_i(ref_x - range, 2, MT9V03X_W - 3);
-    end_x = clamp_i(ref_x + range, 2, MT9V03X_W - 3);
-
-    best_x = -1;
-    best_dist = 10000;
-
-    for (x = start_x; x <= end_x; x++)
-    {
-        if (is_left_transition(row, x))
-        {
-            dist = abs_i(x - ref_x);
-            if (dist < best_dist)
+            if (PIXEL_IS_WHITE_FAST(row, col) && PIXEL_IS_WHITE_FAST(row, col - BORDER_BIAS))
             {
-                best_dist = dist;
-                best_x = x;
+                *right_out = col;
+                flag_r = 1;
+                break;
             }
         }
-    }
 
-    return best_x;
-}
-
-// ¾Ö²¿´°¿ÚÕÒÓÒ±ßÔµ£ºÓÅÏÈÌù½üref_x£¬¼õÐ¡Ìø±ä
-static int find_right_edge_local(int row, int ref_x, int range)
-{
-    int x;
-    int start_x;
-    int end_x;
-    int best_x;
-    int best_dist;
-    int dist;
-
-    start_x = clamp_i(ref_x - range, 2, MT9V03X_W - 3);
-    end_x = clamp_i(ref_x + range, 2, MT9V03X_W - 3);
-
-    best_x = -1;
-    best_dist = 10000;
-
-    for (x = start_x; x <= end_x; x++)
-    {
-        if (is_right_transition(row, x))
+        if (flag_r)
         {
-            dist = abs_i(x - ref_x);
-            if (dist < best_dist)
+            for (; col - BORDER_BIAS > 0; col--)
             {
-                best_dist = dist;
-                best_x = x;
-            }
-        }
-    }
-
-    return best_x;
-}
-
-// È«ÐÐ²¹É¨×ó±ßÔµ£ºÓÃÓÚ´ó½Ç¶ÈÍäµÀ¾Ö²¿ËÑË÷Ê§°Ü¶µµ×
-static int find_left_edge_global(int row)
-{
-    int x;
-    for (x = 2; x <= MT9V03X_W - 3; x++)
-    {
-        if (is_left_transition(row, x))
-        {
-            return x;
-        }
-    }
-    return -1;
-}
-
-// È«ÐÐ²¹É¨ÓÒ±ßÔµ£ºÓÃÓÚ´ó½Ç¶ÈÍäµÀ¾Ö²¿ËÑË÷Ê§°Ü¶µµ×
-static int find_right_edge_global(int row)
-{
-    int x;
-    for (x = MT9V03X_W - 3; x >= 2; x--)
-    {
-        if (is_right_transition(row, x))
-        {
-            return x;
-        }
-    }
-    return -1;
-}
-
-// ÕûÐÐËÑË÷»ùµã£¬±£Ö¤´óÍäÌù±ßÊ±Ò²ÄÜÆð²½
-void find_jidian(void)
-{
-    int y;
-    int left_x;
-    int right_x;
-
-    y = jidian_search_line - 1;
-    y = clamp_i(y, search_end_line + 1, MT9V03X_H - 1);
-
-    left_x = find_left_edge_global(y);
-    right_x = find_right_edge_global(y);
-
-    if (left_x < 0) left_x = 1;
-    if (right_x < 0) right_x = MT9V03X_W - 2;
-
-    left_jidian = (uint8)left_x;
-    right_jidian = (uint8)right_x;
-}
-
-// Ö÷Ñ°Ïß£ºÖðÐÐÌáÈ¡×óÓÒ±ß½ç£¬²¢ÔÚµ¥±ß¶ªÏßÊ±×ö¿í¶ÈÄ£ÐÍÖØ½¨
-void image_deal(void)
-{
-    int row;
-    int left_now;
-    int right_now;
-    int left_prev;
-    int right_prev;
-    int mid_seed;
-    int left_found;
-    int right_found;
-    int width_meas;
-    int width_est;
-    int width_filtered;
-    int both_valid;
-    int total_rows;
-    int mid_now;
-    int default_half;
-    int local_range;
-    int left_rebuilt;
-    int right_rebuilt;
-    int fix_mid;
-    int fix_half;
-    int fill_row;
-    int miss_streak;
-    uint8 prev_low_conf;
-
-    for (row = 0; row < MT9V03X_H; row++)
-    {
-        left_line_list[row] = 1;
-        right_line_list[row] = MT9V03X_W - 2;
-        mid_line_list[row] = MID_W;
-    }
-
-    camera_valid_line_cnt = 0;
-    camera_lost_left_cnt = 0;
-    camera_lost_right_cnt = 0;
-    total_rows = 0;
-
-    left_prev = (int)left_jidian;
-    right_prev = (int)right_jidian;
-
-    if ((right_prev - left_prev) < CAMERA_EDGE_MIN_GAP)
-    {
-        left_prev = MID_W - 30;
-        right_prev = MID_W + 30;
-    }
-
-    left_prev = clamp_i(left_prev, 1, MT9V03X_W - 8);
-    right_prev = clamp_i(right_prev, left_prev + CAMERA_EDGE_MIN_GAP, MT9V03X_W - 2);
-    width_filtered = right_prev - left_prev;
-    mid_seed = (left_prev + right_prev) / 2;
-    miss_streak = 0;
-    prev_low_conf = (camera_confidence <= CAMERA_RESCAN_CONF_TH) ? 1 : 0;
-
-    for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
-    {
-        total_rows += CAMERA_ROW_STEP;
-        both_valid = 0;
-        left_rebuilt = 0;
-        right_rebuilt = 0;
-
-        local_range = 18 + (search_start_line - row) / 5;
-        local_range = clamp_i(local_range, CAMERA_LOCAL_RANGE_MIN, CAMERA_LOCAL_RANGE_MAX);
-
-        left_found = find_left_edge_local(row, left_prev, local_range);
-        right_found = find_right_edge_local(row, right_prev, local_range);
-
-        // ¾Ö²¿¶¼Ã»ÕÒµ½Ê±£¬ÓÃÖÐÏßÖÖ×Ó×öÒ»´ÎÀ©´ó´°¿ÚËÑË÷
-        if ((left_found < 0) && (right_found < 0))
-        {
-            left_found = find_left_edge_local(row, mid_seed, local_range + 10);
-            right_found = find_right_edge_local(row, mid_seed, local_range + 10);
-        }
-
-        if ((left_found < 0) || (right_found < 0))
-        {
-            miss_streak++;
-        }
-        else
-        {
-            miss_streak = 0;
-        }
-
-#if CAMERA_GLOBAL_RESCAN_ENABLE
-        if ((row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) &&
-            ((miss_streak >= CAMERA_RESCAN_STREAK_TH) ||
-             (row >= CAMERA_RESCAN_FORCE_NEAR_ROW) ||
-             prev_low_conf))
-        {
-            if (left_found < 0)
-            {
-                left_found = find_left_edge_global(row);
-            }
-            if (right_found < 0)
-            {
-                right_found = find_right_edge_global(row);
-            }
-        }
-#endif
-
-        if ((left_found >= 0) && (right_found >= 0) && ((right_found - left_found) >= CAMERA_EDGE_MIN_GAP))
-        {
-            left_now = left_found;
-            right_now = right_found;
-            both_valid = 1;
-        }
-        else if ((left_found >= 0) && (right_found < 0))
-        {
-            width_est = width_filtered;
-            left_now = left_found;
-            right_now = left_found + width_est;
-            right_rebuilt = 1;
-        }
-        else if ((right_found >= 0) && (left_found < 0))
-        {
-            width_est = width_filtered;
-            right_now = right_found;
-            left_now = right_found - width_est;
-            left_rebuilt = 1;
-        }
-        else
-        {
-            default_half = estimate_half_width(row);
-            mid_now = mid_seed;
-            left_now = mid_now - default_half;
-            right_now = mid_now + default_half;
-            left_rebuilt = 1;
-            right_rebuilt = 1;
-        }
-
-        left_now = clamp_i(left_now, 1, MT9V03X_W - 3);
-        right_now = clamp_i(right_now, 2, MT9V03X_W - 2);
-
-        if ((right_now - left_now) < CAMERA_EDGE_MIN_GAP)
-        {
-            fix_mid = (left_now + right_now) / 2;
-            fix_half = estimate_half_width(row);
-            left_now = clamp_i(fix_mid - fix_half, 1, MT9V03X_W - 3);
-            right_now = clamp_i(fix_mid + fix_half, 2, MT9V03X_W - 2);
-            if (left_found < 0) left_rebuilt = 1;
-            if (right_found < 0) right_rebuilt = 1;
-        }
-
-        width_meas = right_now - left_now;
-        if ((width_meas >= CAMERA_WIDTH_MIN) && (width_meas <= CAMERA_WIDTH_MAX))
-        {
-            width_filtered = (int)(((long)width_filtered * (100 - CAMERA_WIDTH_FILT_ALPHA_PCT) + (long)width_meas * CAMERA_WIDTH_FILT_ALPHA_PCT + 50) / 100);
-        }
-
-        left_line_list[row] = (uint8)left_now;
-        right_line_list[row] = (uint8)right_now;
-        mid_now = (left_now + right_now) / 2;
-        mid_line_list[row] = (uint8)clamp_i(mid_now, 1, MT9V03X_W - 2);
-
-        // ÐÐ²½½øÊ±£¬°ÑÖÐ¼äÎ´´¦ÀíÐÐÓÃµ±Ç°½á¹ûÌî³ä£¬±£³ÖÖÐÏßÁ¬Ðø
-        if (CAMERA_ROW_STEP > 1)
-        {
-            for (fill_row = row + 1; (fill_row < row + CAMERA_ROW_STEP) && (fill_row < search_start_line); fill_row++)
-            {
-                if (fill_row > search_end_line)
+                if (!PIXEL_IS_WHITE_FAST(row, col) && !PIXEL_IS_WHITE_FAST(row, col - BORDER_BIAS))
                 {
-                    left_line_list[fill_row] = left_line_list[row];
-                    right_line_list[fill_row] = right_line_list[row];
-                    mid_line_list[fill_row] = mid_line_list[row];
+                    *left_out = col;
+                    flag_l = 1;
+                    break;
                 }
             }
         }
-
-        if (both_valid)
+        else
         {
-            if (camera_valid_line_cnt <= (uint8)(255 - CAMERA_ROW_STEP))
+            for (col = mid; col + BORDER_BIAS < MT9V03X_W - 1; col++)
             {
-                camera_valid_line_cnt += CAMERA_ROW_STEP;
+                if (PIXEL_IS_WHITE_FAST(row, col) && PIXEL_IS_WHITE_FAST(row, col + BORDER_BIAS))
+                {
+                    *left_out = col;
+                    flag_l = 1;
+                    break;
+                }
             }
-            else
+
+            if (flag_l)
             {
-                camera_valid_line_cnt = 255;
+                for (; col + BORDER_BIAS < MT9V03X_W - 1; col++)
+                {
+                    if (!PIXEL_IS_WHITE_FAST(row, col) && !PIXEL_IS_WHITE_FAST(row, col + BORDER_BIAS))
+                    {
+                        *right_out = col;
+                        flag_r = 1;
+                        break;
+                    }
+                }
             }
         }
-        if (left_rebuilt)
-        {
-            if (camera_lost_left_cnt < 255) camera_lost_left_cnt++;
-        }
-        if (right_rebuilt)
-        {
-            if (camera_lost_right_cnt < 255) camera_lost_right_cnt++;
-        }
-
-        left_prev = left_now;
-        right_prev = right_now;
-
-        mid_seed = (CAMERA_MID_SEED_BLEND_NUM * mid_seed + mid_now) / (CAMERA_MID_SEED_BLEND_NUM + 1);
-        mid_seed = clamp_i(mid_seed, 2, MT9V03X_W - 3);
-    }
-
-    if (total_rows <= 0)
-    {
-        camera_confidence = 0;
     }
     else
     {
-        int conf;
-        conf = (int)camera_valid_line_cnt * 100 / total_rows;
+        for (col = mid; col - BORDER_BIAS > 0; col--)
+        {
+            if (!PIXEL_IS_WHITE_FAST(row, col) && !PIXEL_IS_WHITE_FAST(row, col - BORDER_BIAS))
+            {
+                *left_out = col;
+                flag_l = 1;
+                break;
+            }
+        }
 
-        // ¶ªÏßÔ½¶à£¬ÖÃÐÅ¶ÈÔ½µÍ
-        conf -= (int)camera_lost_left_cnt / 2;
-        conf -= (int)camera_lost_right_cnt / 2;
-        conf = clamp_i(conf, 0, 100);
-        camera_confidence = (uint8)conf;
+        for (col = mid; col + BORDER_BIAS < MT9V03X_W - 1; col++)
+        {
+            if (!PIXEL_IS_WHITE_FAST(row, col) && !PIXEL_IS_WHITE_FAST(row, col + BORDER_BIAS))
+            {
+                *right_out = col;
+                flag_r = 1;
+                break;
+            }
+        }
     }
+
+    if (!flag_l)
+    {
+        *left_out = 0;
+    }
+    if (!flag_r)
+    {
+        *right_out = MT9V03X_W - 1;
+    }
+    if (*left_out >= *right_out)
+    {
+        *left_out = 0;
+        *right_out = MT9V03X_W - 1;
+        flag_l = 0;
+        flag_r = 0;
+    }
+
+    *mid_io = (*left_out + *right_out) / 2;
+    *left_ok = flag_l;
+    *right_ok = flag_r;
 }
 
-// ¸ù¾ÝÖÐÏßÊý×é¼ÆËã×îÖÕÖÐÏßÊä³ö£¬²¢Éú³É¸øcontrolµÄÊÓ¾õÌØÕ÷
-uint8 find_mid_line_weight(void)
+void find_jidian(void)
 {
     int row;
-    uint32 sum_mid = 0;
-    uint32 sum_w = 0;
-    int width_now;
-    int row_weight;
-    int near_y;
-    int far_y;
-    int mid_new;
-    int rough_preview;
-    int abs_preview;
-    int step_limit;
-    int32 delta_x8;
-    int32 target_mid_x8;
-    int preview_tmp;
-    uint8 final_mid_tmp;
-    int16 bias_tmp;
-    int16 preview_out;
-    uint8 ea_state;
+    int mid;
+    int left;
+    int right;
+    uint8 left_ok;
+    uint8 right_ok;
 
-    near_y = clamp_i(CAMERA_NEAR_ROW, search_end_line + 1, MT9V03X_H - 1);
+    row = clamp_i(jidian_search_line - 1, search_end_line + 1, MT9V03X_H - 1);
+    mid = MID_W;
+    scan_one_row(row, &mid, &left, &right, &left_ok, &right_ok);
 
-    // ÏÈÓÃ¹Ì¶¨ÐÐ×öÒ»°æ´ÖÇ°Õ°£¬ÔÙ¶¯Ì¬¾ö¶¨far_y
-    rough_preview = (int)mid_line_list[32] - (int)mid_line_list[near_y];
-    abs_preview = abs_i(rough_preview);
+    left_jidian = (uint8)clamp_i(left, 0, MT9V03X_W - 1);
+    right_jidian = (uint8)clamp_i(right, 0, MT9V03X_W - 1);
+    scan_mid = (uint8)clamp_i(mid, 1, MT9V03X_W - 2);
+}
 
-    if (abs_preview >= 12)
+void image_deal(void)
+{
+    int row;
+    int mid;
+    int left;
+    int right;
+    int total_rows;
+    int valid_rows;
+    int fill_row;
+    uint8 left_ok;
+    uint8 right_ok;
+
+    for (row = 0; row < MT9V03X_H; row++)
     {
-        far_y = 38; // ¼±ÍäÊ±ÂÔ¿¿½ü£¬¼õÉÙÔ¶´¦ÔëÉùÎóµ¼
-    }
-    else if (abs_preview >= 6)
-    {
-        far_y = 34;
-    }
-    else
-    {
-        far_y = 28; // Ö±µÀ/»ºÍäÊ±¿´µÃ¸üÔ¶£¬ÌáÇ°Ô¤ÅÐ
+        left_line_list[row] = 0;
+        right_line_list[row] = MT9V03X_W - 1;
+        mid_line_list[row] = MID_W;
     }
 
-    if (camera_confidence < 50)
-    {
-        far_y += 4; // µÍÖÃÐÅ¶ÈÊ±»ØÊÕÇ°Õ°¾àÀë£¬ÓÅÏÈÎÈ¶¨
-    }
-
-    far_y = clamp_i(far_y, search_end_line + 1, MT9V03X_H - 1);
+    camera_lost_left_cnt = 0;
+    camera_lost_right_cnt = 0;
+    total_rows = 0;
+    valid_rows = 0;
+    mid = scan_mid;
 
     for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
     {
-        if (row >= (MT9V03X_H - 10)) row_weight = 18;
-        else if (row >= (MT9V03X_H - 24)) row_weight = 14;
-        else if (row >= 80) row_weight = 10;
-        else if (row >= 60) row_weight = 6;
-        else row_weight = 3;
+        scan_one_row(row, &mid, &left, &right, &left_ok, &right_ok);
 
-        width_now = (int)right_line_list[row] - (int)left_line_list[row];
-        if ((width_now < CAMERA_WIDTH_MIN) || (width_now > CAMERA_WIDTH_MAX))
+        left_line_list[row] = (uint8)left;
+        right_line_list[row] = (uint8)right;
+        mid_line_list[row] = (uint8)mid;
+
+        for (fill_row = row - 1; (fill_row > row - CAMERA_ROW_STEP) && (fill_row > search_end_line); fill_row--)
         {
-            row_weight = (row_weight * 5) / 10;
+            left_line_list[fill_row] = (uint8)left;
+            right_line_list[fill_row] = (uint8)right;
+            mid_line_list[fill_row] = (uint8)mid;
         }
 
-        if ((left_line_list[row] <= 2) || (right_line_list[row] >= MT9V03X_W - 3))
+        total_rows += CAMERA_ROW_STEP;
+        if (left_ok && right_ok)
         {
-            row_weight = (row_weight * 7) / 10;
+            valid_rows += CAMERA_ROW_STEP;
         }
-
-        sum_mid += (uint32)mid_line_list[row] * (uint32)row_weight;
-        sum_w += (uint32)row_weight;
+        if (!left_ok)
+        {
+            camera_lost_left_cnt = (uint8)clamp_i((int)camera_lost_left_cnt + CAMERA_ROW_STEP, 0, 255);
+        }
+        if (!right_ok)
+        {
+            camera_lost_right_cnt = (uint8)clamp_i((int)camera_lost_right_cnt + CAMERA_ROW_STEP, 0, 255);
+        }
     }
 
-    if (sum_w == 0)
+    scan_mid = (uint8)clamp_i(mid, 1, MT9V03X_W - 2);
+    camera_valid_line_cnt = (uint8)clamp_i(valid_rows, 0, 255);
+    if (total_rows > 0)
     {
-        mid_new = MID_W;
+        camera_confidence = (uint8)clamp_i((valid_rows * 100) / total_rows, 0, 100);
     }
     else
     {
-        mid_new = (int)(sum_mid / sum_w);
+        camera_confidence = 0;
+    }
+}
+
+static int avg_mid_window(int center_row, int radius)
+{
+    int row;
+    int start_row;
+    int end_row;
+    int sum_mid;
+    int cnt;
+
+    center_row = clamp_i(center_row, search_end_line + 1, search_start_line - 1);
+    start_row = clamp_i(center_row - radius, search_end_line + 1, search_start_line - 1);
+    end_row = clamp_i(center_row + radius, search_end_line + 1, search_start_line - 1);
+
+    sum_mid = 0;
+    cnt = 0;
+    for (row = start_row; row <= end_row; row++)
+    {
+        sum_mid += mid_line_list[row];
+        cnt++;
     }
 
-    mid_new = clamp_i(mid_new, 1, MT9V03X_W - 2);
-
-    if (!final_mid_init)
+    if (cnt <= 0)
     {
-        final_mid_filtered_x8 = mid_new * 8;
-        final_mid_init = 1;
+        return mid_line_list[center_row];
+    }
+    return sum_mid / cnt;
+}
+
+static int fixed_row_bias_mid(int startline, int endline)
+{
+    int row;
+    int sum_mid;
+    int cnt;
+    int mid;
+
+    startline = clamp_i(startline, search_end_line + 1, search_start_line - 1);
+    endline = clamp_i(endline, search_end_line, startline - 1);
+    sum_mid = 0;
+    cnt = 0;
+
+    for (row = startline; row > endline; row--)
+    {
+        mid = mid_line_list[row];
+        if (!PIXEL_IS_WHITE_FAST(row, mid))
+        {
+            break;
+        }
+        if ((row + 1 < MT9V03X_H) && (abs_i(mid_line_list[row] - mid_line_list[row + 1]) > MT9V03X_W / 3))
+        {
+            break;
+        }
+
+        sum_mid += mid;
+        cnt++;
+    }
+
+    if (cnt >= CAMERA_MIN_BIAS_ROWS)
+    {
+        last_bias_mid = sum_mid / cnt;
+    }
+    return last_bias_mid;
+}
+
+static int16 regression_slope_x10(int startline, int endline)
+{
+    int row;
+    int actual_endline;
+    int sum_x;
+    int sum_y;
+    int cnt;
+    float avg_x;
+    float avg_y;
+    float sum_up;
+    float sum_down;
+    float slope;
+
+    startline = clamp_i(startline, search_end_line + 1, search_start_line - 1);
+    endline = clamp_i(endline, search_end_line, startline - 1);
+    actual_endline = endline;
+    sum_x = 0;
+    sum_y = 0;
+    cnt = 0;
+
+    for (row = startline; row > endline; row--)
+    {
+        if (!PIXEL_IS_WHITE_FAST(row, mid_line_list[row]))
+        {
+            actual_endline = row;
+            break;
+        }
+        if ((row + 1 < MT9V03X_H) && (abs_i(mid_line_list[row] - mid_line_list[row + 1]) > MT9V03X_W / 3))
+        {
+            actual_endline = row;
+            break;
+        }
+
+        sum_x += row;
+        sum_y += mid_line_list[row];
+        cnt++;
+    }
+
+    if (cnt <= CAMERA_MIN_BIAS_ROWS)
+    {
+        return last_slope_x10;
+    }
+
+    avg_x = (float)sum_x / (float)cnt;
+    avg_y = (float)sum_y / (float)cnt;
+    sum_up = 0.0f;
+    sum_down = 0.0f;
+
+    for (row = startline; row > actual_endline; row--)
+    {
+        sum_up += ((float)mid_line_list[row] - avg_y) * ((float)row - avg_x);
+        sum_down += ((float)row - avg_x) * ((float)row - avg_x);
+    }
+
+    if (sum_down == 0.0f)
+    {
+        slope = 0.0f;
     }
     else
     {
-        step_limit = CAMERA_FINAL_MID_STEP_MIN + abs_preview / 2;
-        step_limit = clamp_i(step_limit, CAMERA_FINAL_MID_STEP_MIN, CAMERA_FINAL_MID_STEP_MAX);
-
-        delta_x8 = (int32)mid_new * 8 - (int32)final_mid_filtered_x8;
-        if (delta_x8 > (int32)step_limit * 8) delta_x8 = (int32)step_limit * 8;
-        if (delta_x8 < -((int32)step_limit * 8)) delta_x8 = -((int32)step_limit * 8);
-
-        target_mid_x8 = (int32)final_mid_filtered_x8 + delta_x8;
-        final_mid_filtered_x8 = (int)(((int32)final_mid_filtered_x8 * (100 - CAMERA_MID_FILT_ALPHA_PCT) + target_mid_x8 * CAMERA_MID_FILT_ALPHA_PCT + 50) / 100);
+        slope = sum_up / sum_down;
     }
 
-    final_mid_tmp = (uint8)clamp_i((final_mid_filtered_x8 + 4) / 8, 1, MT9V03X_W - 2);
-    bias_tmp = (int16)((int)final_mid_tmp - MID_W);
-    preview_tmp = (int)mid_line_list[far_y] - (int)mid_line_list[near_y];
-    preview_tmp = clamp_i(preview_tmp, -90, 90);
-    preview_out = (int16)preview_tmp;
+    last_slope_x10 = (int16)clamp_i((int)(slope * 10.0f), -90, 90);
+    return last_slope_x10;
+}
+
+uint8 find_mid_line_weight(void)
+{
+    int bias_mid;
+    int near_mid;
+    int preview_mid;
+    int far_mid;
+    int preview;
+    int preview_far;
+    int curve;
+    int slope_x10;
+    uint8 route_mode;
+    uint8 ea_state;
+
+    bias_mid = fixed_row_bias_mid(CAMERA_BIAS_START_LINE, CAMERA_BIAS_END_LINE);
+    near_mid = avg_mid_window(CAMERA_PREVIEW_NEAR_ROW, CAMERA_AVG_RADIUS);
+    preview_mid = avg_mid_window(CAMERA_PREVIEW_MID_ROW, CAMERA_AVG_RADIUS);
+    far_mid = avg_mid_window(CAMERA_PREVIEW_FAR_ROW, CAMERA_AVG_RADIUS);
+
+    preview = preview_mid - near_mid;
+    preview_far = far_mid - near_mid;
+    curve = far_mid - 2 * preview_mid + near_mid;
+    slope_x10 = regression_slope_x10(CAMERA_BIAS_START_LINE, CAMERA_BIAS_END_LINE);
+
+    route_mode = 0;
+    if ((abs_i(preview) >= 8) || (abs_i(preview_far) >= 12) || (abs_i(curve) >= 10))
+    {
+        route_mode = 2;
+    }
+    if ((abs_i(preview) >= 8) && (abs_i(preview_far) >= 12) &&
+        (sign_i(preview) != 0) && (sign_i(preview_far) != 0) &&
+        (sign_i(preview) != sign_i(preview_far)))
+    {
+        route_mode = 1;
+    }
 
     ea_state = EA;
     EA = 0;
-    final_mid_line = final_mid_tmp;
-    camera_bias_raw = bias_tmp;
-    camera_preview_raw = preview_out;
+    final_mid_line = (uint8)clamp_i(bias_mid, 1, MT9V03X_W - 2);
+    camera_bias_raw = (int16)clamp_i(bias_mid - MID_W, -90, 90);
+    camera_preview_raw = (int16)clamp_i(preview, -90, 90);
+    camera_preview_far_raw = (int16)clamp_i(preview_far, -90, 90);
+    camera_curve_raw = (int16)clamp_i(curve + slope_x10, -90, 90);
+    camera_route_mode = route_mode;
     EA = ea_state;
 
-    return final_mid_tmp;
+    return final_mid_line;
 }
 
 #if CAMERA_DEBUG_DRAW_ENABLE
 static void draw_debug_overlay(void)
 {
     int row;
-    int px, py;
+    int px;
+    int py;
 
     ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
 
@@ -763,9 +627,21 @@ void camara_init(void)
 
 void camara_task(void)
 {
+    static uint8 threshold_div = 0;
+
     if (mt9v03x_finish_flag)
     {
         mt9v03x_finish_flag = 0;
+
+        if (threshold_div == 0)
+        {
+            img_threshold = otsu_threshold();
+        }
+        threshold_div++;
+        if (threshold_div >= CAMERA_THRESHOLD_UPDATE_DIV)
+        {
+            threshold_div = 0;
+        }
 
         find_jidian();
         image_deal();
@@ -784,7 +660,6 @@ void camara_task(void)
 #endif
     }
 }
-
 
 #elif (IPS200_OR_WIFI == 1)
 
@@ -820,46 +695,32 @@ void camara_init(void)
 
 void camara_task(void)
 {
+    static uint8 threshold_div = 0;
+
     if (mt9v03x_finish_flag)
     {
         mt9v03x_finish_flag = 0;
+
+        if (threshold_div == 0)
+        {
+            img_threshold = otsu_threshold();
+        }
+        threshold_div++;
+        if (threshold_div >= CAMERA_THRESHOLD_UPDATE_DIV)
+        {
+            threshold_div = 0;
+        }
 
         find_jidian();
         image_deal();
         (void)find_mid_line_weight();
         mark_frame_processed();
 
-#if CAMERA_BINARY_OUTPUT_ENABLE
         make_binary_snapshot();
-#endif
         seekfree_assistant_camera_send();
     }
 }
 
-
 #else
 #error "IPS200_OR_WIFI must be 0 or 1."
 #endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

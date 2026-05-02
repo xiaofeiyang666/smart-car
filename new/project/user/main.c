@@ -8,9 +8,9 @@
 #include "pid.h"
 #include "brushless.h"
 
-// ´®¿Úµ÷ÊÔ¿ª¹Ø£º0=¹Ø±Õ£¨ÌáÉýÐÔÄÜ£©£¬1=¿ªÆô£¨Êä³öfps/off/pre£©
+// ä¸²å£è°ƒè¯•å¼€å…³ï¼š0=å…³é—­ï¼ˆæå‡æ€§èƒ½ï¼‰ï¼Œ1=å¼€å¯ï¼ˆè¾“å‡ºfps/off/preï¼‰
 #define UART_DEBUG_PRINT_ENABLE    1
-// ¿ªÆôµ÷ÊÔÊ±µÄ·ÖÆµ£ºÃ¿N´Îprint_flagÊä³öÒ»´Î£¬¼õÐ¡´®¿Ú×èÈû
+// å¼€å¯è°ƒè¯•æ—¶çš„åˆ†é¢‘ï¼šæ¯Næ¬¡print_flagè¾“å‡ºä¸€æ¬¡ï¼Œå‡å°ä¸²å£é˜»å¡ž
 #define UART_DEBUG_PRINT_DIV       5
 
 void main(void)
@@ -23,7 +23,7 @@ void main(void)
     clock_init(SYSTEM_CLOCK_96M);
     debug_init();
 
-    // Ó²¼þ³õÊ¼»¯
+    // ç¡¬ä»¶åˆå§‹åŒ–
     motor_init();
     encoder_init();
     servo_init();
@@ -33,16 +33,16 @@ void main(void)
     imu660ra_init();
 
 #if UART_DEBUG_PRINT_ENABLE
-    // ¿ªÆôÎÞÏß´®¿Ú£¬±ãÓÚÊµÊ±²é¿´fpsºÍÆ«²î
+    // å¼€å¯æ— çº¿ä¸²å£ï¼Œä¾¿äºŽå®žæ—¶æŸ¥çœ‹fpså’Œåå·®
     wireless_uart_init();
 #endif
 
-    // ÉãÏñÍ·³õÊ¼»¯
+    // æ‘„åƒå¤´åˆå§‹åŒ–
     camara_init();
 
-    // ¿ØÖÆ»·20ms
+    // æŽ§åˆ¶çŽ¯20ms
     pit_ms_init(TIM0_PIT, 20, control_loop);
-    // 1ms½ÚÅÄÓÃÓÚÍ³¼Æcurrent_fps
+    // 1msèŠ‚æ‹ç”¨äºŽç»Ÿè®¡current_fps
     pit_ms_init(TIM1_PIT, 1, my_fps_timer_callback);
 
     EA = 1;
@@ -51,7 +51,7 @@ void main(void)
     {
         camara_task();
 
-        // print_flag´óÔ¼100ms´¥·¢Ò»´Î
+        // print_flagå¤§çº¦100msè§¦å‘ä¸€æ¬¡
         if (print_flag)
         {
             print_flag = 0;
@@ -61,7 +61,9 @@ void main(void)
             if (uart_dbg_div >= UART_DEBUG_PRINT_DIV)
             {
                 uart_dbg_div = 0;
-                sprintf(debug_str, "fps=%u,off=%d,pre=%d\r\n", current_fps, camera_bias_raw, camera_preview_raw);
+                sprintf(debug_str, "fps=%u,off=%d,pre=%d,far=%d,cur=%d,mode=%u,conf=%u\r\n",
+                        current_fps, camera_bias_raw, camera_preview_raw, camera_preview_far_raw,
+                        camera_curve_raw, camera_route_mode, camera_confidence);
                 wireless_uart_send_string(debug_str);
             }
 #endif

@@ -3,10 +3,10 @@
 
 #include "zf_common_headfile.h"
 
-// Ä£Ê½Ñ¡Ôñ£º0=IPS200ÏÔÊ¾£¬1=WiFiÍ¼´«
+// æ¨¡å¼é€‰æ‹©ï¼š0=IPS200æ˜¾ç¤ºï¼Œ1=WiFiå›¾ä¼ 
 #define IPS200_OR_WIFI   0
 
-// Í¼ÏñËÑË÷·¶Î§ÅäÖÃ
+// å›¾åƒæœç´¢èŒƒå›´é…ç½®
 #define jidian_search_line         120
 #define search_start_line          120
 #define search_end_line            10
@@ -25,9 +25,12 @@ extern uint8 mid_line_list[MT9V03X_H];
 extern uint8 final_mid_line;
 extern volatile uint16 current_fps;
 
-// Ìá¹©¸ø control µÄÊÓ¾õÖÊÁ¿Ö¸±ê
+// æä¾›ç»™ control çš„è§†è§‰è´¨é‡æŒ‡æ ‡
 extern int16 camera_bias_raw;
 extern int16 camera_preview_raw;
+extern int16 camera_preview_far_raw;
+extern int16 camera_curve_raw;
+extern uint8 camera_route_mode;
 extern uint8 camera_valid_line_cnt;
 extern uint8 camera_lost_left_cnt;
 extern uint8 camera_lost_right_cnt;
@@ -38,4 +41,3 @@ void camara_task(void);
 void my_fps_timer_callback(void);
 
 #endif
-

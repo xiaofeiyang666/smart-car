@@ -1,0 +1,1096 @@
+#include "camera.h"
+#include "zf_common_headfile.h"
+
+// ===================== 可调参数（视觉层） =====================
+#define CAMERA_DEBUG_DRAW_ENABLE         1   // 0=关闭显示提帧率，1=开启显示便于调试
+#define CAMERA_DEBUG_DRAW_INTERVAL       6
+
+// 性能档位：0=稳健，1=均衡，2=高帧率（推荐）
+#define CAMERA_PERF_PROFILE              2
+
+#if (CAMERA_PERF_PROFILE == 0)
+#define CAMERA_LOCAL_RANGE_MIN           14
+#define CAMERA_LOCAL_RANGE_MAX           36
+#define CAMERA_GLOBAL_RESCAN_NEAR_ROW    96
+#define CAMERA_ROW_STEP                  2
+#define CAMERA_MID_FILT_ALPHA_PCT        72
+#define CAMERA_FINAL_MID_STEP_MIN        4
+#define CAMERA_FINAL_MID_STEP_MAX        16
+#define CAMERA_RESCAN_STREAK_TH          1
+#define CAMERA_RESCAN_FORCE_NEAR_ROW     114
+#define CAMERA_RESCAN_CONF_TH            50
+#elif (CAMERA_PERF_PROFILE == 1)
+#define CAMERA_LOCAL_RANGE_MIN           12
+#define CAMERA_LOCAL_RANGE_MAX           32
+#define CAMERA_GLOBAL_RESCAN_NEAR_ROW    106
+#define CAMERA_ROW_STEP                  2
+#define CAMERA_MID_FILT_ALPHA_PCT        70
+#define CAMERA_FINAL_MID_STEP_MIN        5
+#define CAMERA_FINAL_MID_STEP_MAX        17
+#define CAMERA_RESCAN_STREAK_TH          2
+#define CAMERA_RESCAN_FORCE_NEAR_ROW     116
+#define CAMERA_RESCAN_CONF_TH            45
+#else
+#define CAMERA_LOCAL_RANGE_MIN           12  // 缩小局部搜索窗口
+#define CAMERA_LOCAL_RANGE_MAX           28
+#define CAMERA_GLOBAL_RESCAN_NEAR_ROW    112 // 全局补扫只保留最靠近车体的区域
+#define CAMERA_ROW_STEP                  3   // 按3行处理，帧率提升最明显
+#define CAMERA_MID_FILT_ALPHA_PCT        66
+#define CAMERA_FINAL_MID_STEP_MIN        6
+#define CAMERA_FINAL_MID_STEP_MAX        18
+#define CAMERA_RESCAN_STREAK_TH          2   // 连续丢线才触发全局补扫
+#define CAMERA_RESCAN_FORCE_NEAR_ROW     116 // 最近场仍强制补扫，防止贴边漏检
+#define CAMERA_RESCAN_CONF_TH            45
+#endif
+
+#define CAMERA_EDGE_GRAD_TH              24  // 灰度梯度阈值：越大越抗噪，越小越灵敏
+#define CAMERA_EDGE_STEP_TH              10  // 邻域亮度跳变阈值：越大越保守
+#define CAMERA_EDGE_SPAN_TH              20  // 局部对比度阈值：抑制低纹理区域误检
+#define CAMERA_EDGE_BIAS_TH              6   // 亮暗偏置阈值：过滤伪边缘
+#define CAMERA_TOP_THRESHOLD_GAIN        14  // 仅调试图传二值化使用
+
+#define CAMERA_WIDTH_MIN                 18
+#define CAMERA_WIDTH_MAX                 (MT9V03X_W - 4)
+#define CAMERA_EDGE_MIN_GAP              8
+
+#define CAMERA_GLOBAL_RESCAN_ENABLE      1   // 1=局部丢线后启用全行补扫
+
+#define CAMERA_WIDTH_FILT_ALPHA_PCT      24
+#define CAMERA_MID_SEED_BLEND_NUM        2   // mid_seed = (a*old + new)/(a+1)
+
+#define CAMERA_NEAR_ROW                  (MT9V03X_H - 5)
+#define CAMERA_AVG_NEAR_START            112
+#define CAMERA_AVG_NEAR_END              92
+#define CAMERA_AVG_MID_START             84
+#define CAMERA_AVG_MID_END               62
+#define CAMERA_AVG_FAR_START             58
+#define CAMERA_AVG_FAR_END               30
+#define CAMERA_REG_START_ROW             96
+#define CAMERA_REG_END_ROW               32
+#define CAMERA_REG_MIN_ROWS              8
+#define CAMERA_REG_JUMP_TH               24
+#define CAMERA_LOW_CONF_SOFT_TH          45
+#define CAMERA_LOW_CONF_HARD_TH          25
+#define CAMERA_LOW_CONF_BIAS_STEP        6
+#define CAMERA_LOW_CONF_PREVIEW_STEP     10
+#define CAMERA_LOW_CONF_SLOPE_STEP       10
+#define CAMERA_LOW_CONF_CURVE_STEP       12
+
+#define WIFI_SSID_TEST                   "Car"
+#define WIFI_PASSWORD_TEST               "431431431"
+#define WIFI_BOUNDARY_ENABLE             1
+#define CAMERA_BINARY_OUTPUT_ENABLE      ((CAMERA_DEBUG_DRAW_ENABLE == 1) || (IPS200_OR_WIFI == 1))
+
+// ===================== 全局输出 =====================
+uint8 img_threshold = 120;
+uint8 left_jidian = 1;
+uint8 right_jidian = MT9V03X_W - 2;
+uint8 left_line_list[MT9V03X_H];
+uint8 right_line_list[MT9V03X_H];
+uint8 mid_line_list[MT9V03X_H];
+uint8 final_mid_line = MID_W;
+
+int16 camera_bias_raw = 0;
+int16 camera_preview_raw = 0;
+int16 camera_slope_raw = 0;
+int16 camera_curve_raw = 0;
+uint8 camera_quality = 0;
+uint8 camera_track_mode = CAMERA_TRACK_STRAIGHT;
+uint8 camera_valid_line_cnt = 0;
+uint8 camera_lost_left_cnt = 0;
+uint8 camera_lost_right_cnt = 0;
+uint8 camera_confidence = 0;
+
+// ===================== 模块内部变量 =====================
+#if CAMERA_BINARY_OUTPUT_ENABLE
+static uint8 bin_image[MT9V03X_H][MT9V03X_W];
+#endif
+static int final_mid_filtered_x8 = MID_W * 8;
+static uint8 final_mid_init = 0;
+static uint8 output_guard_init = 0;
+static int16 last_good_bias = 0;
+static int16 last_good_preview = 0;
+static int16 last_good_slope = 0;
+static int16 last_good_curve = 0;
+
+volatile uint16 current_fps = 0;
+volatile uint16 fps_counter = 0;
+#if CAMERA_DEBUG_DRAW_ENABLE
+static uint8 skip_draw = 0;
+#endif
+
+static int abs_i(int x)
+{
+    return (x >= 0) ? x : -x;
+}
+
+static int clamp_i(int x, int min_v, int max_v)
+{
+    if (x < min_v) return min_v;
+    if (x > max_v) return max_v;
+    return x;
+}
+
+static int limit_step_i(int value, int ref, int step)
+{
+    int delta;
+    delta = value - ref;
+    if (delta > step) return ref + step;
+    if (delta < -step) return ref - step;
+    return value;
+}
+
+static uint8 is_left_transition(int row, int x)
+{
+    int g0, g1, g2, g3, g4;
+    int local_min;
+    int local_max;
+    int grad;
+    int step;
+    int grad_th;
+
+    if (x < 2 || x > MT9V03X_W - 3) return 0;
+
+    g0 = (int)mt9v03x_image[row][x - 2];
+    g1 = (int)mt9v03x_image[row][x - 1];
+    g2 = (int)mt9v03x_image[row][x];
+    g3 = (int)mt9v03x_image[row][x + 1];
+    g4 = (int)mt9v03x_image[row][x + 2];
+
+    local_min = g0;
+    if (g1 < local_min) local_min = g1;
+    if (g2 < local_min) local_min = g2;
+    if (g3 < local_min) local_min = g3;
+    if (g4 < local_min) local_min = g4;
+
+    local_max = g0;
+    if (g1 > local_max) local_max = g1;
+    if (g2 > local_max) local_max = g2;
+    if (g3 > local_max) local_max = g3;
+    if (g4 > local_max) local_max = g4;
+
+    if ((local_max - local_min) < CAMERA_EDGE_SPAN_TH) return 0;
+
+    grad_th = CAMERA_EDGE_GRAD_TH;
+    if (row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) grad_th -= 2;
+    if (row <= 32) grad_th += 2;
+    if (grad_th < 12) grad_th = 12;
+
+    grad = (g2 + g3) - (g0 + g1);
+    step = g2 - g1;
+
+    if ((grad >= grad_th) &&
+        (step >= CAMERA_EDGE_STEP_TH) &&
+        ((g2 - local_min) >= CAMERA_EDGE_BIAS_TH))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static uint8 is_right_transition(int row, int x)
+{
+    int g0, g1, g2, g3, g4;
+    int local_min;
+    int local_max;
+    int grad;
+    int step;
+    int grad_th;
+
+    if (x < 2 || x > MT9V03X_W - 3) return 0;
+
+    g0 = (int)mt9v03x_image[row][x - 2];
+    g1 = (int)mt9v03x_image[row][x - 1];
+    g2 = (int)mt9v03x_image[row][x];
+    g3 = (int)mt9v03x_image[row][x + 1];
+    g4 = (int)mt9v03x_image[row][x + 2];
+
+    local_min = g0;
+    if (g1 < local_min) local_min = g1;
+    if (g2 < local_min) local_min = g2;
+    if (g3 < local_min) local_min = g3;
+    if (g4 < local_min) local_min = g4;
+
+    local_max = g0;
+    if (g1 > local_max) local_max = g1;
+    if (g2 > local_max) local_max = g2;
+    if (g3 > local_max) local_max = g3;
+    if (g4 > local_max) local_max = g4;
+
+    if ((local_max - local_min) < CAMERA_EDGE_SPAN_TH) return 0;
+
+    grad_th = CAMERA_EDGE_GRAD_TH;
+    if (row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) grad_th -= 2;
+    if (row <= 32) grad_th += 2;
+    if (grad_th < 12) grad_th = 12;
+
+    grad = (g0 + g1) - (g2 + g3);
+    step = g1 - g2;
+
+    if ((grad >= grad_th) &&
+        (step >= CAMERA_EDGE_STEP_TH) &&
+        ((local_max - g2) >= CAMERA_EDGE_BIAS_TH))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+void mark_frame_processed(void)
+{
+    fps_counter++;
+}
+
+void my_fps_timer_callback(void)
+{
+    static uint16 time_ms = 0;
+    time_ms++;
+    if (time_ms >= 1000)
+    {
+        current_fps = fps_counter;
+        fps_counter = 0;
+        time_ms = 0;
+    }
+}
+
+// 灰度快照+二值快照：仅用于调试显示/图传，不参与主寻线
+#if CAMERA_BINARY_OUTPUT_ENABLE
+static void make_binary_snapshot(void)
+{
+    uint16 y, x;
+    uint8 th_top;
+    uint8 th_bot;
+    uint16 top_end;
+    uint8 th;
+    uint8 g;
+
+    th_bot = img_threshold;
+    th_top = (img_threshold > (255 - CAMERA_TOP_THRESHOLD_GAIN)) ? 255 : (img_threshold + CAMERA_TOP_THRESHOLD_GAIN);
+    top_end = MT9V03X_H / 3;
+
+    for (y = 0; y < MT9V03X_H; y++)
+    {
+        th = (y < top_end) ? th_top : th_bot;
+        for (x = 0; x < MT9V03X_W; x++)
+        {
+            g = mt9v03x_image[y][x];
+            bin_image[y][x] = (g >= th) ? 255 : 0;
+        }
+    }
+
+}
+#endif
+
+// 根据行号估计赛道半宽（近处更宽，远处更窄）
+static int estimate_half_width(int row)
+{
+    int num;
+    int den;
+    int val;
+
+    den = (search_start_line - search_end_line);
+    if (den <= 0) den = 1;
+
+    num = (row - search_end_line);
+    if (num < 0) num = 0;
+    if (num > den) num = den;
+
+    // 远处约44，近处约78
+    val = 44 + (34 * num) / den;
+    val = clamp_i(val, 42, 80);
+    return val;
+}
+
+// 局部窗口找左边缘：优先贴近ref_x，减小跳变
+static int find_left_edge_local(int row, int ref_x, int range)
+{
+    int x;
+    int start_x;
+    int end_x;
+    int best_x;
+    int best_dist;
+    int dist;
+
+    start_x = clamp_i(ref_x - range, 2, MT9V03X_W - 3);
+    end_x = clamp_i(ref_x + range, 2, MT9V03X_W - 3);
+
+    best_x = -1;
+    best_dist = 10000;
+
+    for (x = start_x; x <= end_x; x++)
+    {
+        if (is_left_transition(row, x))
+        {
+            dist = abs_i(x - ref_x);
+            if (dist < best_dist)
+            {
+                best_dist = dist;
+                best_x = x;
+            }
+        }
+    }
+
+    return best_x;
+}
+
+// 局部窗口找右边缘：优先贴近ref_x，减小跳变
+static int find_right_edge_local(int row, int ref_x, int range)
+{
+    int x;
+    int start_x;
+    int end_x;
+    int best_x;
+    int best_dist;
+    int dist;
+
+    start_x = clamp_i(ref_x - range, 2, MT9V03X_W - 3);
+    end_x = clamp_i(ref_x + range, 2, MT9V03X_W - 3);
+
+    best_x = -1;
+    best_dist = 10000;
+
+    for (x = start_x; x <= end_x; x++)
+    {
+        if (is_right_transition(row, x))
+        {
+            dist = abs_i(x - ref_x);
+            if (dist < best_dist)
+            {
+                best_dist = dist;
+                best_x = x;
+            }
+        }
+    }
+
+    return best_x;
+}
+
+// 全行补扫左边缘：用于大角度弯道局部搜索失败兜底
+static int find_left_edge_global(int row)
+{
+    int x;
+    for (x = 2; x <= MT9V03X_W - 3; x++)
+    {
+        if (is_left_transition(row, x))
+        {
+            return x;
+        }
+    }
+    return -1;
+}
+
+// 全行补扫右边缘：用于大角度弯道局部搜索失败兜底
+static int find_right_edge_global(int row)
+{
+    int x;
+    for (x = MT9V03X_W - 3; x >= 2; x--)
+    {
+        if (is_right_transition(row, x))
+        {
+            return x;
+        }
+    }
+    return -1;
+}
+
+// 整行搜索基点，保证大弯贴边时也能起步
+void find_jidian(void)
+{
+    int y;
+    int left_x;
+    int right_x;
+
+    y = jidian_search_line - 1;
+    y = clamp_i(y, search_end_line + 1, MT9V03X_H - 1);
+
+    left_x = find_left_edge_global(y);
+    right_x = find_right_edge_global(y);
+
+    if (left_x < 0) left_x = 1;
+    if (right_x < 0) right_x = MT9V03X_W - 2;
+
+    left_jidian = (uint8)left_x;
+    right_jidian = (uint8)right_x;
+}
+
+// 主寻线：逐行提取左右边界，并在单边丢线时做宽度模型重建
+void image_deal(void)
+{
+    int row;
+    int left_now;
+    int right_now;
+    int left_prev;
+    int right_prev;
+    int mid_seed;
+    int left_found;
+    int right_found;
+    int width_meas;
+    int width_est;
+    int width_filtered;
+    int both_valid;
+    int total_rows;
+    int mid_now;
+    int default_half;
+    int local_range;
+    int left_rebuilt;
+    int right_rebuilt;
+    int fix_mid;
+    int fix_half;
+    int fill_row;
+    int miss_streak;
+    uint8 prev_low_conf;
+
+    for (row = 0; row < MT9V03X_H; row++)
+    {
+        left_line_list[row] = 1;
+        right_line_list[row] = MT9V03X_W - 2;
+        mid_line_list[row] = MID_W;
+    }
+
+    camera_valid_line_cnt = 0;
+    camera_lost_left_cnt = 0;
+    camera_lost_right_cnt = 0;
+    total_rows = 0;
+
+    left_prev = (int)left_jidian;
+    right_prev = (int)right_jidian;
+
+    if ((right_prev - left_prev) < CAMERA_EDGE_MIN_GAP)
+    {
+        left_prev = MID_W - 30;
+        right_prev = MID_W + 30;
+    }
+
+    left_prev = clamp_i(left_prev, 1, MT9V03X_W - 8);
+    right_prev = clamp_i(right_prev, left_prev + CAMERA_EDGE_MIN_GAP, MT9V03X_W - 2);
+    width_filtered = right_prev - left_prev;
+    mid_seed = (left_prev + right_prev) / 2;
+    miss_streak = 0;
+    prev_low_conf = (camera_confidence <= CAMERA_RESCAN_CONF_TH) ? 1 : 0;
+
+    for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
+    {
+        total_rows += CAMERA_ROW_STEP;
+        both_valid = 0;
+        left_rebuilt = 0;
+        right_rebuilt = 0;
+
+        local_range = 18 + (search_start_line - row) / 5;
+        local_range = clamp_i(local_range, CAMERA_LOCAL_RANGE_MIN, CAMERA_LOCAL_RANGE_MAX);
+
+        left_found = find_left_edge_local(row, left_prev, local_range);
+        right_found = find_right_edge_local(row, right_prev, local_range);
+
+        // 局部都没找到时，用中线种子做一次扩大窗口搜索
+        if ((left_found < 0) && (right_found < 0))
+        {
+            left_found = find_left_edge_local(row, mid_seed, local_range + 10);
+            right_found = find_right_edge_local(row, mid_seed, local_range + 10);
+        }
+
+        if ((left_found < 0) || (right_found < 0))
+        {
+            miss_streak++;
+        }
+        else
+        {
+            miss_streak = 0;
+        }
+
+#if CAMERA_GLOBAL_RESCAN_ENABLE
+        if ((row >= CAMERA_GLOBAL_RESCAN_NEAR_ROW) &&
+            ((miss_streak >= CAMERA_RESCAN_STREAK_TH) ||
+             (row >= CAMERA_RESCAN_FORCE_NEAR_ROW) ||
+             prev_low_conf))
+        {
+            if (left_found < 0)
+            {
+                left_found = find_left_edge_global(row);
+            }
+            if (right_found < 0)
+            {
+                right_found = find_right_edge_global(row);
+            }
+        }
+#endif
+
+        if ((left_found >= 0) && (right_found >= 0) && ((right_found - left_found) >= CAMERA_EDGE_MIN_GAP))
+        {
+            left_now = left_found;
+            right_now = right_found;
+            both_valid = 1;
+        }
+        else if ((left_found >= 0) && (right_found < 0))
+        {
+            width_est = width_filtered;
+            left_now = left_found;
+            right_now = left_found + width_est;
+            right_rebuilt = 1;
+        }
+        else if ((right_found >= 0) && (left_found < 0))
+        {
+            width_est = width_filtered;
+            right_now = right_found;
+            left_now = right_found - width_est;
+            left_rebuilt = 1;
+        }
+        else
+        {
+            default_half = estimate_half_width(row);
+            mid_now = mid_seed;
+            left_now = mid_now - default_half;
+            right_now = mid_now + default_half;
+            left_rebuilt = 1;
+            right_rebuilt = 1;
+        }
+
+        left_now = clamp_i(left_now, 1, MT9V03X_W - 3);
+        right_now = clamp_i(right_now, 2, MT9V03X_W - 2);
+
+        if ((right_now - left_now) < CAMERA_EDGE_MIN_GAP)
+        {
+            fix_mid = (left_now + right_now) / 2;
+            fix_half = estimate_half_width(row);
+            left_now = clamp_i(fix_mid - fix_half, 1, MT9V03X_W - 3);
+            right_now = clamp_i(fix_mid + fix_half, 2, MT9V03X_W - 2);
+            if (left_found < 0) left_rebuilt = 1;
+            if (right_found < 0) right_rebuilt = 1;
+        }
+
+        width_meas = right_now - left_now;
+        if ((width_meas >= CAMERA_WIDTH_MIN) && (width_meas <= CAMERA_WIDTH_MAX))
+        {
+            width_filtered = (int)(((long)width_filtered * (100 - CAMERA_WIDTH_FILT_ALPHA_PCT) + (long)width_meas * CAMERA_WIDTH_FILT_ALPHA_PCT + 50) / 100);
+        }
+
+        left_line_list[row] = (uint8)left_now;
+        right_line_list[row] = (uint8)right_now;
+        mid_now = (left_now + right_now) / 2;
+        mid_line_list[row] = (uint8)clamp_i(mid_now, 1, MT9V03X_W - 2);
+
+        // 行步进时，把中间未处理行用当前结果填充，保持中线连续
+        if (CAMERA_ROW_STEP > 1)
+        {
+            for (fill_row = row + 1; (fill_row < row + CAMERA_ROW_STEP) && (fill_row < search_start_line); fill_row++)
+            {
+                if (fill_row > search_end_line)
+                {
+                    left_line_list[fill_row] = left_line_list[row];
+                    right_line_list[fill_row] = right_line_list[row];
+                    mid_line_list[fill_row] = mid_line_list[row];
+                }
+            }
+        }
+
+        if (both_valid)
+        {
+            if (camera_valid_line_cnt <= (uint8)(255 - CAMERA_ROW_STEP))
+            {
+                camera_valid_line_cnt += CAMERA_ROW_STEP;
+            }
+            else
+            {
+                camera_valid_line_cnt = 255;
+            }
+        }
+        if (left_rebuilt)
+        {
+            if (camera_lost_left_cnt < 255) camera_lost_left_cnt++;
+        }
+        if (right_rebuilt)
+        {
+            if (camera_lost_right_cnt < 255) camera_lost_right_cnt++;
+        }
+
+        left_prev = left_now;
+        right_prev = right_now;
+
+        mid_seed = (CAMERA_MID_SEED_BLEND_NUM * mid_seed + mid_now) / (CAMERA_MID_SEED_BLEND_NUM + 1);
+        mid_seed = clamp_i(mid_seed, 2, MT9V03X_W - 3);
+    }
+
+    if (total_rows <= 0)
+    {
+        camera_confidence = 0;
+    }
+    else
+    {
+        int conf;
+        conf = (int)camera_valid_line_cnt * 100 / total_rows;
+
+        // 丢线越多，置信度越低
+        conf -= (int)camera_lost_left_cnt / 2;
+        conf -= (int)camera_lost_right_cnt / 2;
+        conf = clamp_i(conf, 0, 100);
+        camera_confidence = (uint8)conf;
+    }
+}
+
+// 判断某一行中线是否适合参与前瞻/回归，避免把丢线重建或贴边行当成可靠赛道。
+static uint8 camera_row_usable(int row)
+{
+    int width_now;
+
+    if ((row <= search_end_line) || (row >= search_start_line)) return 0;
+    width_now = (int)right_line_list[row] - (int)left_line_list[row];
+    if ((width_now < CAMERA_WIDTH_MIN) || (width_now > CAMERA_WIDTH_MAX)) return 0;
+    if ((left_line_list[row] <= 2) || (right_line_list[row] >= MT9V03X_W - 3)) return 0;
+    return 1;
+}
+
+static int camera_window_mid_avg(int start_row, int end_row, int *valid_cnt, int *jump_cnt)
+{
+    int row;
+    int sum_mid;
+    int cnt;
+    int mid_now;
+    int prev_mid;
+    uint8 prev_valid;
+
+    sum_mid = 0;
+    cnt = 0;
+    prev_mid = MID_W;
+    prev_valid = 0;
+    start_row = clamp_i(start_row, search_end_line + 1, search_start_line - 1);
+    end_row = clamp_i(end_row, search_end_line + 1, search_start_line - 1);
+    if (start_row < end_row)
+    {
+        row = start_row;
+        start_row = end_row;
+        end_row = row;
+    }
+
+    for (row = start_row; row >= end_row; row -= CAMERA_ROW_STEP)
+    {
+        if (!camera_row_usable(row)) continue;
+        mid_now = (int)mid_line_list[row];
+        if (prev_valid && (abs_i(mid_now - prev_mid) > CAMERA_REG_JUMP_TH))
+        {
+            (*jump_cnt)++;
+            continue;
+        }
+        sum_mid += mid_now;
+        cnt++;
+        prev_mid = mid_now;
+        prev_valid = 1;
+    }
+
+    *valid_cnt = cnt;
+    if (cnt <= 0) return MID_W;
+    return sum_mid / cnt;
+}
+
+static int camera_regression_preview(int start_row, int end_row, int near_y, int far_y, int *valid_cnt, int *jump_cnt)
+{
+    int row;
+    int cnt;
+    int mid_now;
+    int prev_mid;
+    uint8 prev_valid;
+    long sum_x;
+    long sum_y;
+    long sum_xy;
+    long sum_y2;
+    long den;
+    long num;
+    long preview;
+
+    cnt = 0;
+    prev_mid = MID_W;
+    prev_valid = 0;
+    sum_x = 0;
+    sum_y = 0;
+    sum_xy = 0;
+    sum_y2 = 0;
+
+    start_row = clamp_i(start_row, search_end_line + 1, search_start_line - 1);
+    end_row = clamp_i(end_row, search_end_line + 1, search_start_line - 1);
+    if (start_row < end_row)
+    {
+        row = start_row;
+        start_row = end_row;
+        end_row = row;
+    }
+
+    for (row = start_row; row >= end_row; row -= CAMERA_ROW_STEP)
+    {
+        if (!camera_row_usable(row)) continue;
+        mid_now = (int)mid_line_list[row];
+        if (prev_valid && (abs_i(mid_now - prev_mid) > CAMERA_REG_JUMP_TH))
+        {
+            (*jump_cnt)++;
+            continue;
+        }
+
+        sum_x += (long)mid_now;
+        sum_y += (long)row;
+        sum_xy += (long)mid_now * (long)row;
+        sum_y2 += (long)row * (long)row;
+        cnt++;
+        prev_mid = mid_now;
+        prev_valid = 1;
+    }
+
+    *valid_cnt = cnt;
+    if (cnt < CAMERA_REG_MIN_ROWS) return 0;
+
+    num = (long)cnt * sum_xy - sum_y * sum_x;
+    den = (long)cnt * sum_y2 - sum_y * sum_y;
+    if (den == 0) return 0;
+
+    preview = (num * (long)(far_y - near_y)) / den;
+    return clamp_i((int)preview, -90, 90);
+}
+
+// 根据中线数组计算最终中线输出，并生成给control的视觉特征
+uint8 find_mid_line_weight(void)
+{
+    int row;
+    uint32 sum_mid = 0;
+    uint32 sum_w = 0;
+    int width_now;
+    int row_weight;
+    int near_y;
+    int far_y;
+    int mid_new;
+    int step_limit;
+    int32 delta_x8;
+    int32 target_mid_x8;
+    int near_avg;
+    int mid_avg;
+    int far_avg;
+    int near_cnt;
+    int mid_cnt;
+    int far_cnt;
+    int reg_cnt;
+    int jump_cnt;
+    int preview_window;
+    int preview_reg;
+    int preview_mid;
+    int preview_far;
+    int preview_tmp;
+    int slope_tmp;
+    int curve_tmp;
+    int quality_tmp;
+    int feature_cnt;
+    int abs_preview;
+    int abs_bias;
+    int bias_step;
+    int preview_step;
+    int slope_step;
+    int curve_step;
+    uint8 s_transition;
+    uint8 mode_tmp;
+    uint8 final_mid_tmp;
+    int16 bias_tmp;
+    int16 preview_out;
+    int16 slope_out;
+    int16 curve_out;
+    uint8 ea_state;
+
+    near_y = clamp_i(CAMERA_NEAR_ROW, search_end_line + 1, MT9V03X_H - 1);
+    far_y = clamp_i((CAMERA_AVG_FAR_START + CAMERA_AVG_FAR_END) / 2, search_end_line + 1, MT9V03X_H - 1);
+    jump_cnt = 0;
+
+    near_avg = camera_window_mid_avg(CAMERA_AVG_NEAR_START, CAMERA_AVG_NEAR_END, &near_cnt, &jump_cnt);
+    mid_avg = camera_window_mid_avg(CAMERA_AVG_MID_START, CAMERA_AVG_MID_END, &mid_cnt, &jump_cnt);
+    far_avg = camera_window_mid_avg(CAMERA_AVG_FAR_START, CAMERA_AVG_FAR_END, &far_cnt, &jump_cnt);
+    preview_reg = camera_regression_preview(CAMERA_REG_START_ROW, CAMERA_REG_END_ROW, near_y, far_y, &reg_cnt, &jump_cnt);
+
+    preview_window = far_avg - near_avg;
+    preview_mid = mid_avg - near_avg;
+    preview_far = far_avg - mid_avg;
+    if (reg_cnt >= CAMERA_REG_MIN_ROWS)
+        preview_tmp = (preview_window * 60 + preview_reg * 40) / 100;
+    else
+        preview_tmp = preview_window;
+    preview_tmp = clamp_i(preview_tmp, -90, 90);
+    slope_tmp = clamp_i(preview_reg, -90, 90);
+    curve_tmp = clamp_i(preview_far - preview_mid, -90, 90);
+
+    for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
+    {
+        if (row >= (MT9V03X_H - 10)) row_weight = 18;
+        else if (row >= (MT9V03X_H - 24)) row_weight = 14;
+        else if (row >= 80) row_weight = 10;
+        else if (row >= 60) row_weight = 6;
+        else row_weight = 3;
+
+        width_now = (int)right_line_list[row] - (int)left_line_list[row];
+        if ((width_now < CAMERA_WIDTH_MIN) || (width_now > CAMERA_WIDTH_MAX))
+        {
+            row_weight = (row_weight * 5) / 10;
+        }
+
+        if ((left_line_list[row] <= 2) || (right_line_list[row] >= MT9V03X_W - 3))
+        {
+            row_weight = (row_weight * 7) / 10;
+        }
+
+        sum_mid += (uint32)mid_line_list[row] * (uint32)row_weight;
+        sum_w += (uint32)row_weight;
+    }
+
+    if (sum_w == 0)
+        mid_new = MID_W;
+    else
+        mid_new = (int)(sum_mid / sum_w);
+
+    mid_new = clamp_i(mid_new, 1, MT9V03X_W - 2);
+    abs_preview = abs_i(preview_tmp);
+
+    if (!final_mid_init)
+    {
+        final_mid_filtered_x8 = mid_new * 8;
+        final_mid_init = 1;
+    }
+    else
+    {
+        step_limit = CAMERA_FINAL_MID_STEP_MIN + abs_preview / 2;
+        step_limit = clamp_i(step_limit, CAMERA_FINAL_MID_STEP_MIN, CAMERA_FINAL_MID_STEP_MAX);
+        delta_x8 = (int32)mid_new * 8 - (int32)final_mid_filtered_x8;
+        if (delta_x8 > (int32)step_limit * 8) delta_x8 = (int32)step_limit * 8;
+        if (delta_x8 < -((int32)step_limit * 8)) delta_x8 = -((int32)step_limit * 8);
+        target_mid_x8 = (int32)final_mid_filtered_x8 + delta_x8;
+        final_mid_filtered_x8 = (int)(((int32)final_mid_filtered_x8 * (100 - CAMERA_MID_FILT_ALPHA_PCT) + target_mid_x8 * CAMERA_MID_FILT_ALPHA_PCT + 50) / 100);
+    }
+
+    final_mid_tmp = (uint8)clamp_i((final_mid_filtered_x8 + 4) / 8, 1, MT9V03X_W - 2);
+    bias_tmp = (int16)((int)final_mid_tmp - MID_W);
+    preview_out = (int16)preview_tmp;
+    slope_out = (int16)slope_tmp;
+    curve_out = (int16)curve_tmp;
+
+    feature_cnt = near_cnt + mid_cnt + far_cnt + reg_cnt;
+    quality_tmp = (int)camera_confidence;
+    if (feature_cnt < 28) quality_tmp -= (28 - feature_cnt) * 2;
+    quality_tmp -= jump_cnt * 4;
+    quality_tmp = clamp_i(quality_tmp, 0, 100);
+
+    abs_bias = abs_i((int)bias_tmp);
+    s_transition = 0;
+    if ((quality_tmp >= CAMERA_LOW_CONF_HARD_TH) &&
+        (((preview_mid >= 4) && (preview_far <= -8)) ||
+         ((preview_mid <= -4) && (preview_far >= 8)) ||
+         ((abs_i(preview_mid) <= 4) && (abs_preview >= 14) && (abs_i(curve_tmp) >= 8))))
+    {
+        s_transition = 1;
+    }
+
+    if (quality_tmp < CAMERA_LOW_CONF_HARD_TH)
+        mode_tmp = CAMERA_TRACK_LOW_CONF;
+    else if (s_transition)
+        mode_tmp = CAMERA_TRACK_S_TRANS;
+    else if ((abs_preview <= 3) && (abs_bias <= 4))
+        mode_tmp = CAMERA_TRACK_STRAIGHT;
+    else if ((abs_preview <= 8) && (abs_bias <= 8) && (abs_i(curve_tmp) <= 10))
+        mode_tmp = CAMERA_TRACK_SMALL_CURVE;
+    else
+        mode_tmp = CAMERA_TRACK_CURVE;
+
+    if (!output_guard_init)
+    {
+        last_good_bias = bias_tmp;
+        last_good_preview = preview_out;
+        last_good_slope = slope_out;
+        last_good_curve = curve_out;
+        output_guard_init = 1;
+    }
+    else
+    {
+        if (quality_tmp < CAMERA_LOW_CONF_SOFT_TH)
+        {
+            bias_step = CAMERA_LOW_CONF_BIAS_STEP;
+            preview_step = CAMERA_LOW_CONF_PREVIEW_STEP;
+            slope_step = CAMERA_LOW_CONF_SLOPE_STEP;
+            curve_step = CAMERA_LOW_CONF_CURVE_STEP;
+            if (quality_tmp >= CAMERA_LOW_CONF_HARD_TH)
+            {
+                bias_step += 3;
+                preview_step += 5;
+                slope_step += 5;
+                curve_step += 6;
+            }
+            bias_tmp = (int16)limit_step_i((int)bias_tmp, (int)last_good_bias, bias_step);
+            preview_out = (int16)limit_step_i((int)preview_out, (int)last_good_preview, preview_step);
+            slope_out = (int16)limit_step_i((int)slope_out, (int)last_good_slope, slope_step);
+            curve_out = (int16)limit_step_i((int)curve_out, (int)last_good_curve, curve_step);
+        }
+
+        if (quality_tmp >= CAMERA_LOW_CONF_HARD_TH)
+        {
+            last_good_bias = bias_tmp;
+            last_good_preview = preview_out;
+            last_good_slope = slope_out;
+            last_good_curve = curve_out;
+        }
+    }
+
+    ea_state = EA;
+    EA = 0;
+    final_mid_line = final_mid_tmp;
+    camera_bias_raw = bias_tmp;
+    camera_preview_raw = preview_out;
+    camera_slope_raw = slope_out;
+    camera_curve_raw = curve_out;
+    camera_quality = (uint8)quality_tmp;
+    camera_track_mode = mode_tmp;
+    EA = ea_state;
+
+    return final_mid_tmp;
+}
+#if CAMERA_DEBUG_DRAW_ENABLE
+static void draw_debug_overlay(void)
+{
+    int row;
+    int px, py;
+
+    ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
+
+    for (row = search_start_line - 1; row > search_end_line; row -= CAMERA_ROW_STEP)
+    {
+        px = (left_line_list[row] * 9) >> 3;
+        py = (row * 9) >> 3;
+        ips200_draw_point(px, py, RGB565_BLUE);
+
+        px = (right_line_list[row] * 9) >> 3;
+        ips200_draw_point(px, py, RGB565_GREEN);
+
+        px = (mid_line_list[row] * 9) >> 3;
+        ips200_draw_point(px, py, RGB565_RED);
+    }
+
+    ips200_show_string(10, 160, "mid:");
+    ips200_show_uint8(60, 160, final_mid_line);
+    ips200_show_string(10, 175, "fps:");
+    ips200_show_uint16(60, 175, current_fps);
+    ips200_show_string(10, 190, "conf:");
+    ips200_show_uint8(60, 190, camera_confidence);
+}
+#endif
+
+#if (IPS200_OR_WIFI == 0)
+
+void camara_init(void)
+{
+    ips200_init();
+    ips200_show_string(0, 0, "mt9v03x init.");
+
+    while (1)
+    {
+        system_delay_ms(80);
+        if (mt9v03x_init())
+        {
+            ips200_show_string(0, 16, "mt9v03x reinit.");
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    ips200_show_string(0, 16, "init success.");
+}
+
+void camara_task(void)
+{
+    if (mt9v03x_finish_flag)
+    {
+        mt9v03x_finish_flag = 0;
+
+        find_jidian();
+        image_deal();
+        (void)find_mid_line_weight();
+        mark_frame_processed();
+
+#if CAMERA_DEBUG_DRAW_ENABLE
+        if (++skip_draw >= CAMERA_DEBUG_DRAW_INTERVAL)
+        {
+            skip_draw = 0;
+#if CAMERA_BINARY_OUTPUT_ENABLE
+            make_binary_snapshot();
+#endif
+            draw_debug_overlay();
+        }
+#endif
+    }
+}
+
+
+#elif (IPS200_OR_WIFI == 1)
+
+void camara_init(void)
+{
+    wireless_uart_init();
+
+    while (wifi_spi_init(WIFI_SSID_TEST, WIFI_PASSWORD_TEST))
+    {
+        system_delay_ms(100);
+    }
+
+    if (1 != WIFI_SPI_AUTO_CONNECT)
+    {
+        while (wifi_spi_socket_connect("TCP", WIFI_SPI_TARGET_IP, WIFI_SPI_TARGET_PORT, WIFI_SPI_LOCAL_PORT))
+        {
+            system_delay_ms(100);
+        }
+    }
+
+    while (mt9v03x_init())
+    {
+        system_delay_ms(80);
+    }
+
+    seekfree_assistant_interface_init(SEEKFREE_ASSISTANT_WIFI_SPI);
+    seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], MT9V03X_W, MT9V03X_H);
+
+#if WIFI_BOUNDARY_ENABLE
+    seekfree_assistant_camera_boundary_config(X_BOUNDARY, MT9V03X_H, left_line_list, right_line_list, mid_line_list, NULL, NULL, NULL);
+#endif
+}
+
+void camara_task(void)
+{
+    if (mt9v03x_finish_flag)
+    {
+        mt9v03x_finish_flag = 0;
+
+        find_jidian();
+        image_deal();
+        (void)find_mid_line_weight();
+        mark_frame_processed();
+
+#if CAMERA_BINARY_OUTPUT_ENABLE
+        make_binary_snapshot();
+#endif
+        seekfree_assistant_camera_send();
+    }
+}
+
+
+#else
+#error "IPS200_OR_WIFI must be 0 or 1."
+#endif
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
