@@ -77,6 +77,19 @@ volatile uint16 current_fps = 0;
 volatile uint16 fps_counter = 0;
 static uint8 skip = 0;
 
+
+int16 camera_bias_raw = 0;
+int16 camera_preview_raw = 0;
+int16 camera_preview_far_raw = 0;
+int16 camera_curve_raw = 0;
+uint8 camera_route_mode = 0;
+uint8 camera_valid_line_cnt = 0;
+uint8 camera_lost_left_cnt = 0;
+uint8 camera_lost_right_cnt = 0;
+uint8 camera_confidence = 0;
+
+static int last_bias_mid = MID_W;
+static int16 last_slope_x10 = 0;
 // ===================== 相机模块调整记录（中文注释） =====================
 // 1) 既有改动：阈值防溢出、状态机修复、调试绘制开关、环岛逻辑开关
 // 2) 本次配合控制改动：保持相机主流程轻量，优先保证转向实时性
@@ -85,7 +98,17 @@ static uint8 skip = 0;
 #define CAMERA_DEBUG_DRAW_ENABLE      0
 #define CAMERA_DEBUG_DRAW_INTERVAL    8
 // 赛道无环岛时建议关闭，可明显减少每帧计算量
+#define CAMERA_THRESHOLD_UPDATE_DIV   3
+#define CAMERA_THRESHOLD_ROW_STEP     4
+#define CAMERA_THRESHOLD_COL_STEP     4
 #define ROUNDABOUT_LOGIC_ENABLE      1
+#define CAMERA_BIAS_START_LINE       70
+#define CAMERA_BIAS_END_LINE         50
+#define CAMERA_PREVIEW_NEAR_ROW      (MT9V03X_H - 15)
+#define CAMERA_PREVIEW_MID_ROW       55
+#define CAMERA_PREVIEW_FAR_ROW       30
+#define CAMERA_AVG_RADIUS            2
+#define CAMERA_MIN_BIAS_ROWS         5
 
 void mark_frame_processed(void) { fps_counter++; }
 
@@ -100,43 +123,69 @@ void my_fps_timer_callback(void)
         time_ms = 0;
     }
 }
-
-/* ===================== Ostu (兼容 C51 修复版) ===================== */
 uint8 Ostu(void)
 {
-    uint16 hist[256] = {0};
-    uint32 total, sum = 0, sumB = 0, wB = 0, wF = 0;
-    
-    // 换回 float，因为 C51 无法使用 64 位整数防溢出
-    float mB, mF, diff, between, maxBetween = -1.0f; 
-    
-    uint8 threshold = 0;
-    uint16 i, x, y;
-
-    for(y = 0; y < MT9V03X_H; y += 2) {
-        for(x = 0; x < MT9V03X_W; x += 2) {
-            hist[mt9v03x_image[y][x]]++;
-        }
-    }
-    total = (MT9V03X_H / 2) * (MT9V03X_W / 2);
-
-    for(i = 0; i < 256; i++) sum += (uint32)i * hist[i];
+    static uint16 hist[256];
+    uint16 row;
+    uint16 col;
+    uint16 i;
+    uint32 total;
+    uint32 sum_all;
+    uint32 sum_back;
+    uint32 weight_back;
+    uint32 weight_fore;
+    uint8 threshold;
+    float mean_back;
+    float mean_fore;
+    float diff;
+    float variance;
+    float max_variance;
 
     for(i = 0; i < 256; i++) {
-        wB += hist[i];
-        if(wB == 0) continue;
-        wF = total - wB;
-        if(wF == 0) break;
+        hist[i] = 0;
+    }
 
-        sumB += (uint32)i * hist[i];
-        mB = (float)sumB / wB;
-        mF = (float)(sum - sumB) / wF;
+    total = 0;
+    for(row = 0; row < MT9V03X_H; row += CAMERA_THRESHOLD_ROW_STEP) {
+        for(col = 0; col < MT9V03X_W; col += CAMERA_THRESHOLD_COL_STEP) {
+            hist[mt9v03x_image[row][col]]++;
+            total++;
+        }
+    }
 
-        diff = mB - mF;
-        between = (float)wB * (float)wF * diff * diff;
+    if(total == 0) {
+        return img_threshold;
+    }
 
-        if(between > maxBetween) {
-            maxBetween = between;
+    sum_all = 0;
+    for(i = 0; i < 256; i++) {
+        sum_all += (uint32)i * (uint32)hist[i];
+    }
+
+    threshold = img_threshold;
+    sum_back = 0;
+    weight_back = 0;
+    max_variance = 0.0f;
+
+    for(i = 0; i < 256; i++) {
+        weight_back += hist[i];
+        if(weight_back == 0) {
+            continue;
+        }
+
+        weight_fore = total - weight_back;
+        if(weight_fore == 0) {
+            break;
+        }
+
+        sum_back += (uint32)i * (uint32)hist[i];
+        mean_back = (float)sum_back / (float)weight_back;
+        mean_fore = (float)(sum_all - sum_back) / (float)weight_fore;
+        diff = mean_back - mean_fore;
+        variance = (float)weight_back * (float)weight_fore * diff * diff;
+
+        if(variance > max_variance) {
+            max_variance = variance;
             threshold = (uint8)i;
         }
     }
@@ -184,11 +233,46 @@ uint8 Limit_uint8(int a, int b, int c)
     return 0;
 }
 
+
+static int abs_i(int x)
+{
+    return (x >= 0) ? x : -x;
+}
+
+static int clamp_i(int x, int min_v, int max_v)
+{
+    if (x < min_v) return min_v;
+    if (x > max_v) return max_v;
+    return x;
+}
+
+static int sign_i(int x)
+{
+    if (x > 0) return 1;
+    if (x < 0) return -1;
+    return 0;
+}
+
+static uint8 pixel_is_white_safe(int row, int col)
+{
+    row = clamp_i(row, 0, MT9V03X_H - 1);
+    col = clamp_i(col, 0, MT9V03X_W - 1);
+    return IS_WHITE(row, col) ? 1 : 0;
+}
+
 /* ===================== 找基点 ===================== */
 void find_jidian(void)
 {
     uint8 j;
-    uint16 y = jidian_search_line - 1;
+    uint16 y;
+
+    if(jidian_search_line <= 1) {
+        y = 1;
+    } else if(jidian_search_line >= MT9V03X_H) {
+        y = MT9V03X_H - 1;
+    } else {
+        y = jidian_search_line - 1;
+    }
 
     left_jidian = 1;
     right_jidian = MT9V03X_W - 2;
@@ -227,10 +311,6 @@ void find_jidian(void)
         }
     }
 }
-
-/* =======================================================================
- * 八邻域边界跟踪算法 (绝不造假、斜率顺延修复版)
- * ======================================================================= */
 void image_deal(void)
 {
     int i;
@@ -1482,8 +1562,201 @@ uint8 mid_weight_list[120]=
     1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1
 };
 
- uint8 final_mid_line = MID_W;
+uint8 final_mid_line = MID_W;
 uint8 last_mid_line = MID_W;
+
+static int avg_mid_window(int center_row, int radius)
+{
+    int row;
+    int start_row;
+    int end_row;
+    int sum_mid;
+    int cnt;
+
+    center_row = clamp_i(center_row, search_end_line + 1, search_start_line - 1);
+    start_row = clamp_i(center_row - radius, search_end_line + 1, search_start_line - 1);
+    end_row = clamp_i(center_row + radius, search_end_line + 1, search_start_line - 1);
+
+    sum_mid = 0;
+    cnt = 0;
+    for (row = start_row; row <= end_row; row++) {
+        sum_mid += mid_line_list[row];
+        cnt++;
+    }
+
+    if (cnt <= 0) {
+        return mid_line_list[center_row];
+    }
+    return sum_mid / cnt;
+}
+
+static int fixed_row_bias_mid(int startline, int endline)
+{
+    int row;
+    int sum_mid;
+    int cnt;
+    int mid;
+
+    startline = clamp_i(startline, search_end_line + 1, search_start_line - 1);
+    endline = clamp_i(endline, search_end_line, startline - 1);
+    sum_mid = 0;
+    cnt = 0;
+
+    for (row = startline; row > endline; row--) {
+        mid = clamp_i(mid_line_list[row], 1, MT9V03X_W - 2);
+        if (!pixel_is_white_safe(row, mid)) {
+            break;
+        }
+        if ((row + 1 < MT9V03X_H) && (abs_i(mid_line_list[row] - mid_line_list[row + 1]) > MT9V03X_W / 3)) {
+            break;
+        }
+
+        sum_mid += mid;
+        cnt++;
+    }
+
+    if (cnt >= CAMERA_MIN_BIAS_ROWS) {
+        last_bias_mid = sum_mid / cnt;
+    }
+    return last_bias_mid;
+}
+
+static int16 regression_slope_x10(int startline, int endline)
+{
+    int row;
+    int actual_endline;
+    int sum_x;
+    int sum_y;
+    int cnt;
+    float avg_x;
+    float avg_y;
+    float sum_up;
+    float sum_down;
+    float slope;
+
+    startline = clamp_i(startline, search_end_line + 1, search_start_line - 1);
+    endline = clamp_i(endline, search_end_line, startline - 1);
+    actual_endline = endline;
+    sum_x = 0;
+    sum_y = 0;
+    cnt = 0;
+
+    for (row = startline; row > endline; row--) {
+        if (!pixel_is_white_safe(row, clamp_i(mid_line_list[row], 1, MT9V03X_W - 2))) {
+            actual_endline = row;
+            break;
+        }
+        if ((row + 1 < MT9V03X_H) && (abs_i(mid_line_list[row] - mid_line_list[row + 1]) > MT9V03X_W / 3)) {
+            actual_endline = row;
+            break;
+        }
+
+        sum_x += row;
+        sum_y += mid_line_list[row];
+        cnt++;
+    }
+
+    if (cnt <= CAMERA_MIN_BIAS_ROWS) {
+        return last_slope_x10;
+    }
+
+    avg_x = (float)sum_x / (float)cnt;
+    avg_y = (float)sum_y / (float)cnt;
+    sum_up = 0.0f;
+    sum_down = 0.0f;
+
+    for (row = startline; row > actual_endline; row--) {
+        sum_up += ((float)mid_line_list[row] - avg_y) * ((float)row - avg_x);
+        sum_down += ((float)row - avg_x) * ((float)row - avg_x);
+    }
+
+    if (sum_down == 0.0f) {
+        slope = 0.0f;
+    } else {
+        slope = sum_up / sum_down;
+    }
+
+    last_slope_x10 = (int16)clamp_i((int)(slope * 10.0f), -90, 90);
+    return last_slope_x10;
+}
+
+static void update_camera_control_outputs(void)
+{
+    int row;
+    int total_rows;
+    int valid_rows;
+    int lost_left;
+    int lost_right;
+    int bias_mid;
+    int near_mid;
+    int preview_mid;
+    int far_mid;
+    int preview;
+    int preview_far;
+    int curve;
+    int slope_x10;
+    uint8 route_mode;
+    uint8 ea_state;
+    uint8 left_ok;
+    uint8 right_ok;
+
+    total_rows = 0;
+    valid_rows = 0;
+    lost_left = 0;
+    lost_right = 0;
+
+    for (row = search_start_line - 1; row > search_end_line; row--) {
+        left_ok = (uint8)((left_line_list[row] > 1) && (left_line_list[row] < MT9V03X_W - 2));
+        right_ok = (uint8)((right_line_list[row] > 1) && (right_line_list[row] < MT9V03X_W - 2));
+        total_rows++;
+        if (left_ok && right_ok) {
+            valid_rows++;
+        }
+        if (!left_ok) {
+            lost_left++;
+        }
+        if (!right_ok) {
+            lost_right++;
+        }
+    }
+
+    bias_mid = fixed_row_bias_mid(CAMERA_BIAS_START_LINE, CAMERA_BIAS_END_LINE);
+    near_mid = avg_mid_window(CAMERA_PREVIEW_NEAR_ROW, CAMERA_AVG_RADIUS);
+    preview_mid = avg_mid_window(CAMERA_PREVIEW_MID_ROW, CAMERA_AVG_RADIUS);
+    far_mid = avg_mid_window(CAMERA_PREVIEW_FAR_ROW, CAMERA_AVG_RADIUS);
+
+    preview = preview_mid - near_mid;
+    preview_far = far_mid - near_mid;
+    curve = far_mid - 2 * preview_mid + near_mid;
+    slope_x10 = regression_slope_x10(CAMERA_BIAS_START_LINE, CAMERA_BIAS_END_LINE);
+
+    route_mode = 0;
+    if ((abs_i(preview) >= 8) || (abs_i(preview_far) >= 12) || (abs_i(curve) >= 10)) {
+        route_mode = 2;
+    }
+    if ((abs_i(preview) >= 8) && (abs_i(preview_far) >= 12) &&
+        (sign_i(preview) != 0) && (sign_i(preview_far) != 0) &&
+        (sign_i(preview) != sign_i(preview_far))) {
+        route_mode = 1;
+    }
+
+    ea_state = EA;
+    EA = 0;
+    camera_bias_raw = (int16)clamp_i(bias_mid - MID_W, -90, 90);
+    camera_preview_raw = (int16)clamp_i(preview, -90, 90);
+    camera_preview_far_raw = (int16)clamp_i(preview_far, -90, 90);
+    camera_curve_raw = (int16)clamp_i(curve + slope_x10, -90, 90);
+    camera_route_mode = route_mode;
+    camera_valid_line_cnt = (uint8)clamp_i(valid_rows, 0, 255);
+    camera_lost_left_cnt = (uint8)clamp_i(lost_left, 0, 255);
+    camera_lost_right_cnt = (uint8)clamp_i(lost_right, 0, 255);
+    if (total_rows > 0) {
+        camera_confidence = (uint8)clamp_i((valid_rows * 100) / total_rows, 0, 100);
+    } else {
+        camera_confidence = 0;
+    }
+    EA = ea_state;
+}
 
 uint8 find_mid_line_weight(void)
 {
@@ -1497,10 +1770,15 @@ uint8 find_mid_line_weight(void)
         weight_midline_sum += mid_line_list[i] * mid_weight_list[i];
         weight_sum += mid_weight_list[i];
     }
-    mid_line=(uint8)(weight_midline_sum/weight_sum);
+    if(weight_sum > 0) {
+        mid_line = (uint8)(weight_midline_sum / weight_sum);
+    }
     mid_line_value = (last_mid_line * 5 + mid_line * 95) / 100;
-    last_mid_line=mid_line_value;
-    return mid_line_value;
+    last_mid_line = mid_line_value;
+    final_mid_line = mid_line_value;
+
+    update_camera_control_outputs();
+    return final_mid_line;
 }
 
 /* ===================== 画线 ===================== */
@@ -1508,7 +1786,7 @@ void draw_line(void)
 {
     uint8 i;
     int px, py,ax,ay;
-		int d;
+    int d;
 
     for(i = MT9V03X_H - 1; i>search_end_line; i--) {
         px = (Limit_uint8(1,left_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
@@ -1523,84 +1801,59 @@ void draw_line(void)
         ips200_draw_point(px, py, RGB565_RED);
         ips200_draw_point(px, py+1, RGB565_RED);
     }
-		
-		// 新增：画出 A 点红色大十字 (上下左右各 3 像素)
-    // ==========================================
+
     if (pt_down_y > 0 && pt_down_y < MT9V03X_H) {
-        // 1. 把相机坐标映射到 IPS 屏幕坐标
         ax = ((int)pt_down_x * 9) >> 3;
         ay = ((int)pt_down_y * 9) >> 3;
-        
-        
-        // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
         for (d = -3; d <= 3; d++) {
-            // 安全限制，防止画到屏幕外导致死机
             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
-                ips200_draw_point(ax + d, ay, RGB565_RED); // 横线
+                ips200_draw_point(ax + d, ay, RGB565_RED);
             }
             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
-                ips200_draw_point(ax, ay + d, RGB565_RED); // 竖线
+                ips200_draw_point(ax, ay + d, RGB565_RED);
             }
         }
     }
-		// 新增：画出 B 点红色大十字 (上下左右各 3 像素)
-    // ==========================================
+
     if (pt_mid_y > 0 && pt_mid_y < MT9V03X_H) {
-        // 1. 把相机坐标映射到 IPS 屏幕坐标
         ax = ((int)pt_mid_x * 9) >> 3;
         ay = ((int)pt_mid_y * 9) >> 3;
-        
-        
-        // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
         for (d = -3; d <= 3; d++) {
-            // 安全限制，防止画到屏幕外导致死机
             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
-                ips200_draw_point(ax + d, ay, RGB565_RED); // 横线
+                ips200_draw_point(ax + d, ay, RGB565_RED);
             }
             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
-                ips200_draw_point(ax, ay + d, RGB565_RED); // 竖线
+                ips200_draw_point(ax, ay + d, RGB565_RED);
             }
         }
     }
-		// 新增：画出 C 点红色大十字 (上下左右各 3 像素)
-    // ==========================================
+
     if (pt_up_y > 0 && pt_up_y < MT9V03X_H) {
-        // 1. 把相机坐标映射到 IPS 屏幕坐标
         ax = ((int)pt_up_x * 9) >> 3;
         ay = ((int)pt_up_y * 9) >> 3;
-        
-        
-        // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
         for (d = -3; d <= 3; d++) {
-            // 安全限制，防止画到屏幕外导致死机
             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
-                ips200_draw_point(ax + d, ay, RGB565_PURPLE); // 横线
+                ips200_draw_point(ax + d, ay, RGB565_PURPLE);
             }
             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
-                ips200_draw_point(ax, ay + d, RGB565_PURPLE); // 竖线
+                ips200_draw_point(ax, ay + d, RGB565_PURPLE);
             }
         }
     }
-		// ==========================================
+
     if (exit_pt_x > 0 && exit_pt_y < MT9V03X_H) {
-        // 1. 把相机坐标映射到 IPS 屏幕坐标
         ax = ((int)exit_pt_x * 9) >> 3;
         ay = ((int)exit_pt_y * 9) >> 3;
-        
-        
-        // 2. 以 ax, ay 为中心，画正负 3 像素的红十字
         for (d = -3; d <= 3; d++) {
-            // 安全限制，防止画到屏幕外导致死机
             if (ax + d >= 0 && ax + d < 240 && ay >= 0 && ay < 240) {
-                ips200_draw_point(ax + d, ay, RGB565_BROWN); // 横线
+                ips200_draw_point(ax + d, ay, RGB565_BROWN);
             }
             if (ax >= 0 && ax < 240 && ay + d >= 0 && ay + d < 240) {
-                ips200_draw_point(ax, ay + d, RGB565_BROWN); // 竖线
+                ips200_draw_point(ax, ay + d, RGB565_BROWN);
             }
         }
     }
 }
-
 #if (IPS200_OR_WIFI == 0)
 void camara_init(void)
 {
@@ -1616,12 +1869,20 @@ void camara_init(void)
 
 void camara_task(void)
 {
+    static uint8 threshold_div = 0;
+
     if(mt9v03x_finish_flag)
     {
         mt9v03x_finish_flag = 0;
 
-        img_threshold = Ostu();
-				make_binary_image();
+        if(threshold_div  == 0) {
+            img_threshold = Ostu();
+        }
+        threshold_div++;
+        if(threshold_div >= CAMERA_THRESHOLD_UPDATE_DIV) {
+            threshold_div = 0;
+        }
+        make_binary_image();
         find_jidian();
         image_deal(); /* 基础扫线 */
 
@@ -1629,9 +1890,9 @@ void camara_task(void)
         judge_roundabout_dir(); /* 预判环岛方向 */
         zuohuan();
         patch_roundabout();
-				patch_crossroad();
+        patch_crossroad();
 #endif
-				
+
         final_mid_line = find_mid_line_weight();
         mark_frame_processed();
 
@@ -1639,10 +1900,8 @@ void camara_task(void)
         if(++skip >= CAMERA_DEBUG_DRAW_INTERVAL) {
             skip = 0;
 
-            
             ips200_show_gray_image(0, 0, bin_image[0], MT9V03X_W, MT9V03X_H, 211, 135, 0);
-						draw_line();
-            
+            draw_line();
 
             ips200_show_string(10, 160, "mid_value:");
             ips200_show_uint8(80,160,final_mid_line);
@@ -1662,7 +1921,6 @@ void camara_task(void)
 #endif
     }
 }
-
 #elif (IPS200_OR_WIFI == 1)
 
 // 【核心修改 1】：把 INCLUDE_BOUNDARY_TYPE 改为 1，开启边线叠加传输！
@@ -1674,24 +1932,17 @@ void camara_task(void)
  * 专用函数：通过 WiFi 虚拟串口发送调试文本
  * 替代原本屏幕上的 ips200_show_string
  * ========================================== */
-
-
 void wifi_send_debug_text(void)
 {
-    char tx[128]; 
+    char tx[128];
     uint8 p = 0;
-    
-    // 拼接基础状态，这三个数据最关键！
+
     tx[p++] = 'D'; tx[p++] = 'i'; tx[p++] = 'r'; tx[p++] = ':'; p += u16_to_str(&tx[p], island_dir); tx[p++] = ' ';
     tx[p++] = 'S'; tx[p++] = 't'; tx[p++] = 'a'; tx[p++] = 't'; tx[p++] = 'e'; tx[p++] = ':'; p += u16_to_str(&tx[p], roundabout_state); tx[p++] = ' ';
-    
-    // 拼接 A 和 B 点坐标，看看到底找到没有
     tx[p++] = 'A'; tx[p++] = '('; p += u16_to_str(&tx[p], pt_down_x); tx[p++] = ','; p += u16_to_str(&tx[p], pt_down_y); tx[p++] = ')'; tx[p++] = ' ';
-    tx[p++] = 'B'; tx[p++] = '('; p += u16_to_str(&tx[p], pt_mid_x); tx[p++] = ','; p += u16_to_str(&tx[p], pt_mid_y); tx[p++] = ')'; 
-    
+    tx[p++] = 'B'; tx[p++] = '('; p += u16_to_str(&tx[p], pt_mid_x); tx[p++] = ','; p += u16_to_str(&tx[p], pt_mid_y); tx[p++] = ')';
     tx[p++] = '\r'; tx[p++] = '\n';
-    
-    // 发送给逐飞助手右侧的文本框
+
     wireless_uart_send_buffer((uint8*)tx, p);
 }
 
@@ -1705,55 +1956,47 @@ void camara_init(void)
     while(mt9v03x_init()) { system_delay_ms(100); }
 
     seekfree_assistant_interface_init(SEEKFREE_ASSISTANT_WIFI_SPI);
-    
-    // 【核心修改 2】：配置图像源
-    // 这里默认发送灰度原图。如果你想看二值化图，把 mt9v03x_image[0] 换成 bin_image[0] 即可
     seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], MT9V03X_W, MT9V03X_H);
 
 #if(1 == INCLUDE_BOUNDARY_TYPE)
-    // 【核心修改 3】：配置三根边线！
-    // 因为我们的数组是按行(Y)存放横坐标(X)的，所以采用 X_BOUNDARY 类型。
-    // 按顺序把 左线、右线、中线 喂给助手，助手会自动把它们按不同颜色画在图传上。
     seekfree_assistant_camera_boundary_config(X_BOUNDARY, MT9V03X_H, left_line_list, right_line_list, mid_line_list, NULL, NULL, NULL);
 #endif
 }
 
 void camara_task(void)
 {
+    static uint8 threshold_div = 0;
+
     if(mt9v03x_finish_flag)
     {
-        mt9v03x_finish_flag = 0;  
+        mt9v03x_finish_flag = 0;
 
-        img_threshold = Ostu();
-				make_binary_image();
+        if(threshold_div == 0) {
+            img_threshold = Ostu();
+        }
+        threshold_div++;
+        if(threshold_div >= CAMERA_THRESHOLD_UPDATE_DIV) {
+            threshold_div = 0;
+        }
+        make_binary_image();
         find_jidian();
         image_deal(); /* 基础扫线 */
-				median_filter_lines();
+        median_filter_lines();
 #if ROUNDABOUT_LOGIC_ENABLE
         judge_roundabout_dir(); /* 预判环岛方向 */
         zuohuan();
         patch_roundabout();
-				patch_crossroad();
+        patch_crossroad();
 #endif
-        
+
         final_mid_line = find_mid_line_weight();
         mark_frame_processed();
-					
-				  // 如果你在初始化里改成了发 bin_image[0]，这里记得取消注释生成二值化图
-				
-				
-				// 触发发送：打包图像 + 左/右/中三条线，一并推给上位机
-				seekfree_assistant_camera_send();
-				wifi_send_debug_text();
-        // 【核心修改 4】：加上降频发送保护！
-        // WiFi 带宽有限，如果每帧都发，会造成严重拥堵和控制延迟。
-        // 这里复用 CAMERA_DEBUG_DRAW_INTERVAL (比如设置成8，即每8帧发一次)
+
+        seekfree_assistant_camera_send();
+        wifi_send_debug_text();
+
         if(++skip >= CAMERA_DEBUG_DRAW_INTERVAL) {
             skip = 0;
-            
-            
-						
-           
         }
     }
 }
