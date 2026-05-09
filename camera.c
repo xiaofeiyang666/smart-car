@@ -109,6 +109,15 @@ static int16 last_slope_x10 = 0;
 #define CAMERA_PREVIEW_FAR_ROW       30
 #define CAMERA_AVG_RADIUS            2
 #define CAMERA_MIN_BIAS_ROWS         5
+#define CAMERA_ROI_BORDER            2
+#define CAMERA_ROI_X_MIN             ((CAMERA_ROI_BORDER < 1) ? 1 : CAMERA_ROI_BORDER)
+#define CAMERA_ROI_X_MAX             ((MT9V03X_W - 1 - CAMERA_ROI_BORDER > MT9V03X_W - 2) ? (MT9V03X_W - 2) : (MT9V03X_W - 1 - CAMERA_ROI_BORDER))
+#define CAMERA_ROI_Y_MIN             ((CAMERA_ROI_BORDER < 0) ? 0 : CAMERA_ROI_BORDER)
+#define CAMERA_ROI_Y_MAX             ((MT9V03X_H - 1 - CAMERA_ROI_BORDER < 0) ? 0 : (MT9V03X_H - 1 - CAMERA_ROI_BORDER))
+#define CAMERA_SEARCH_ROW_MIN        ((search_end_line + 1 > CAMERA_ROI_Y_MIN) ? (search_end_line + 1) : CAMERA_ROI_Y_MIN)
+#define CAMERA_SEARCH_ROW_MAX        ((search_start_line - 1 < CAMERA_ROI_Y_MAX) ? (search_start_line - 1) : CAMERA_ROI_Y_MAX)
+#define CAMERA_LINE_X_MIN            (CAMERA_ROI_X_MIN)
+#define CAMERA_LINE_X_MAX            (CAMERA_ROI_X_MAX)
 
 void mark_frame_processed(void) { fps_counter++; }
 
@@ -116,13 +125,13 @@ void my_fps_timer_callback(void)
 {
     static uint16 time_ms = 0;
     time_ms++;
-    if(time_ms >= 1000)
-    {
+    if(time_ms >= 1000) {
         current_fps = fps_counter;
         fps_counter = 0;
         time_ms = 0;
     }
 }
+
 uint8 Ostu(void)
 {
     static uint16 hist[256];
@@ -146,8 +155,8 @@ uint8 Ostu(void)
     }
 
     total = 0;
-    for(row = 0; row < MT9V03X_H; row += CAMERA_THRESHOLD_ROW_STEP) {
-        for(col = 0; col < MT9V03X_W; col += CAMERA_THRESHOLD_COL_STEP) {
+    for(row = CAMERA_ROI_Y_MIN; row <= CAMERA_ROI_Y_MAX; row += CAMERA_THRESHOLD_ROW_STEP) {
+        for(col = CAMERA_ROI_X_MIN; col <= CAMERA_ROI_X_MAX; col += CAMERA_THRESHOLD_COL_STEP) {
             hist[mt9v03x_image[row][col]]++;
             total++;
         }
@@ -190,28 +199,34 @@ uint8 Ostu(void)
         }
     }
     return threshold;
-} 
-
+}
 /* ===================== 快照生成函数 (极速剥离版) ===================== */
 static void make_binary_image(void)
 {
     uint16 y, x;
-    // 提前计算好两个区域的固定阈值，坚决不放在循环里算！
     uint8 thresh_top = (img_threshold > 235) ? 255 : (img_threshold + 20);
     uint8 thresh_bot = img_threshold;
     uint16 limit_y = MT9V03X_H / 3;
 
-    // 上 1/3 区域
-    for (y = 0; y < limit_y; y++) {
-        for (x = 0; x < MT9V03X_W; x++) {
-            bin_image[y][x] = (mt9v03x_image[y][x] >= thresh_top) ? 255 : 0;
-        }
-    }
-    
-    // 下 2/3 区域
-    for (y = limit_y; y < MT9V03X_H; y++) {
-        for (x = 0; x < MT9V03X_W; x++) {
-            bin_image[y][x] = (mt9v03x_image[y][x] >= thresh_bot) ? 255 : 0;
+    for (y = 0; y < MT9V03X_H; y++) {
+        if (y < CAMERA_ROI_Y_MIN || y > CAMERA_ROI_Y_MAX) {
+            for (x = 0; x < MT9V03X_W; x++) {
+                bin_image[y][x] = 0;
+            }
+        } else {
+            for (x = 0; x < CAMERA_ROI_X_MIN; x++) {
+                bin_image[y][x] = 0;
+            }
+            for (x = CAMERA_ROI_X_MIN; x <= CAMERA_ROI_X_MAX; x++) {
+                if (y < limit_y) {
+                    bin_image[y][x] = (mt9v03x_image[y][x] >= thresh_top) ? 255 : 0;
+                } else {
+                    bin_image[y][x] = (mt9v03x_image[y][x] >= thresh_bot) ? 255 : 0;
+                }
+            }
+            for (x = CAMERA_ROI_X_MAX + 1; x < MT9V03X_W; x++) {
+                bin_image[y][x] = 0;
+            }
         }
     }
 }
@@ -256,7 +271,7 @@ static int sign_i(int x)
 static uint8 pixel_is_white_safe(int row, int col)
 {
     row = clamp_i(row, 0, MT9V03X_H - 1);
-    col = clamp_i(col, 0, MT9V03X_W - 1);
+    col = clamp_i(col, CAMERA_LINE_X_MIN, CAMERA_LINE_X_MAX);
     return IS_WHITE(row, col) ? 1 : 0;
 }
 
@@ -265,49 +280,56 @@ void find_jidian(void)
 {
     uint8 j;
     uint16 y;
+    uint16 center_x;
+    uint16 quarter_x;
+    uint16 three_quarter_x;
 
-    if(jidian_search_line <= 1) {
-        y = 1;
-    } else if(jidian_search_line >= MT9V03X_H) {
-        y = MT9V03X_H - 1;
+    if(jidian_search_line <= CAMERA_SEARCH_ROW_MIN) {
+        y = CAMERA_SEARCH_ROW_MIN;
+    } else if(jidian_search_line >= CAMERA_SEARCH_ROW_MAX + 1) {
+        y = CAMERA_SEARCH_ROW_MAX;
     } else {
         y = jidian_search_line - 1;
     }
 
-    left_jidian = 1;
-    right_jidian = MT9V03X_W - 2;
+    center_x = (uint16)clamp_i(MT9V03X_W / 2, CAMERA_ROI_X_MIN + 1, CAMERA_ROI_X_MAX - 1);
+    quarter_x = (uint16)clamp_i(MT9V03X_W / 4, CAMERA_ROI_X_MIN + 1, CAMERA_ROI_X_MAX - 1);
+    three_quarter_x = (uint16)clamp_i((MT9V03X_W / 4) * 3, CAMERA_ROI_X_MIN + 1, CAMERA_ROI_X_MAX - 1);
 
-    if(IS_WHITE(y, MT9V03X_W/2) && IS_WHITE(y, MT9V03X_W/2 + 1) && IS_WHITE(y, MT9V03X_W/2 - 1))
+    left_jidian = (uint8)CAMERA_ROI_X_MIN;
+    right_jidian = (uint8)CAMERA_ROI_X_MAX;
+
+    if(IS_WHITE(y, center_x) && IS_WHITE(y, center_x + 1) && IS_WHITE(y, center_x - 1))
     {
-        for(j=MT9V03X_W/2;j>0;j--) {
-            if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
-            if(j-1==1) { left_jidian=1; break; }
+        for(j = center_x; j > CAMERA_ROI_X_MIN; j--) {
+            if(IS_BLACK(y, j - 1) && IS_WHITE(y, j) && IS_WHITE(y, j + 1)) { left_jidian = j; break; }
+            if(j - 1 == CAMERA_ROI_X_MIN) { left_jidian = (uint8)CAMERA_ROI_X_MIN; break; }
         }
-        for(j=MT9V03X_W/2;j<MT9V03X_W-2;j++) {
-            if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
-            if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
+        for(j = center_x; j < CAMERA_ROI_X_MAX; j++) {
+            if(IS_WHITE(y, j - 1) && IS_WHITE(y, j) && IS_BLACK(y, j + 1)) { right_jidian = j; break; }
+            if(j + 1 == CAMERA_ROI_X_MAX) { right_jidian = (uint8)CAMERA_ROI_X_MAX; break; }
         }
     }
-    else if(IS_WHITE(y, MT9V03X_W/4) && IS_WHITE(y, MT9V03X_W/4 + 1) && IS_WHITE(y, MT9V03X_W/4 - 1))
+    else if(IS_WHITE(y, quarter_x) && IS_WHITE(y, quarter_x + 1) && IS_WHITE(y, quarter_x - 1))
     {
-        for(j=MT9V03X_W/4;j>0;j--) {
-            if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
-            if(j-1==1) { left_jidian=1; break; }
+        for(j = quarter_x; j > CAMERA_ROI_X_MIN; j--) {
+            if(IS_BLACK(y, j - 1) && IS_WHITE(y, j) && IS_WHITE(y, j + 1)) { left_jidian = j; break; }
+            if(j - 1 == CAMERA_ROI_X_MIN) { left_jidian = (uint8)CAMERA_ROI_X_MIN; break; }
         }
-        for(j=MT9V03X_W/4;j<MT9V03X_W-2;j++) {
-            if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
-            if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
+        for(j = quarter_x; j < CAMERA_ROI_X_MAX; j++) {
+            if(IS_WHITE(y, j - 1) && IS_WHITE(y, j) && IS_BLACK(y, j + 1)) { right_jidian = j; break; }
+            if(j + 1 == CAMERA_ROI_X_MAX) { right_jidian = (uint8)CAMERA_ROI_X_MAX; break; }
         }
     }
-    else if(IS_WHITE(y, MT9V03X_W/4*3) && IS_WHITE(y, MT9V03X_W/4*3 + 1) && IS_WHITE(y, MT9V03X_W/4*3 - 1))
+    else if(IS_WHITE(y, three_quarter_x) && IS_WHITE(y, three_quarter_x + 1) && IS_WHITE(y, three_quarter_x - 1))
     {
-        for(j=MT9V03X_W/4*3;j>0;j--) {
-            if(IS_BLACK(y, j-1) && IS_WHITE(y, j) && IS_WHITE(y, j+1)) { left_jidian=j; break; }
-            if(j-1==1) { left_jidian=1; break; }
+        for(j = three_quarter_x; j > CAMERA_ROI_X_MIN; j--) {
+            if(IS_BLACK(y, j - 1) && IS_WHITE(y, j) && IS_WHITE(y, j + 1)) { left_jidian = j; break; }
+            if(j - 1 == CAMERA_ROI_X_MIN) { left_jidian = (uint8)CAMERA_ROI_X_MIN; break; }
         }
-        for(j=MT9V03X_W/4*3;j<MT9V03X_W-2;j++) {
-            if(IS_WHITE(y, j-1) && IS_WHITE(y, j) && IS_BLACK(y, j+1)) { right_jidian=j; break; }
-            if(j+1==MT9V03X_W-2) { right_jidian=MT9V03X_W-2; break; }
+        for(j = three_quarter_x; j < CAMERA_ROI_X_MAX; j++) {
+            if(IS_WHITE(y, j - 1) && IS_WHITE(y, j) && IS_BLACK(y, j + 1)) { right_jidian = j; break; }
+            if(j + 1 == CAMERA_ROI_X_MAX) { right_jidian = (uint8)CAMERA_ROI_X_MAX; break; }
         }
     }
 }
@@ -318,8 +340,6 @@ void image_deal(void)
     int curr_x, curr_y, curr_dir;
     int search_dir, found, start_search;
     int nx, ny;
-    
-    // 用于斜率延展填补的变量
     int l_slope = 0, r_slope = 0;
     int l_valid_y = -1, r_valid_y = -1;
     int new_x;
@@ -334,15 +354,15 @@ void image_deal(void)
 
     start_left_x = left_jidian;
     start_right_x = right_jidian;
-    start_y = jidian_search_line - 1;
-    
-    if (start_left_x < 1) start_left_x = 1;
-    if (start_right_x > MT9V03X_W - 2) start_right_x = MT9V03X_W - 2;
+    start_y = clamp_i(jidian_search_line - 1, CAMERA_SEARCH_ROW_MIN, CAMERA_SEARCH_ROW_MAX);
+
+    if (start_left_x < CAMERA_LINE_X_MIN) start_left_x = CAMERA_LINE_X_MIN;
+    if (start_right_x > CAMERA_LINE_X_MAX) start_right_x = CAMERA_LINE_X_MAX;
 
     /* ---------------- 左边缘八邻域爬行 ---------------- */
     curr_x = start_left_x;
     curr_y = start_y;
-    curr_dir = 0; 
+    curr_dir = 0;
 
     while (left_pts_cnt < MT9V03X_H * 3) {
         left_pts_x[left_pts_cnt] = curr_x;
@@ -350,39 +370,45 @@ void image_deal(void)
         left_pts_dir[left_pts_cnt] = curr_dir;
         left_pts_cnt++;
 
-        /* ?? 修复漏洞一：白点验真护甲！只有真正在赛道上的点才允许写入数组！ */
         if (curr_y >= 0 && curr_y < MT9V03X_H) {
-            if (IS_WHITE(curr_y, curr_x)) { // 绝不允许记录盲走时的黑点！
+            if (IS_WHITE(curr_y, curr_x)) {
                 if (left_line_list[curr_y] == 255 || curr_x < left_line_list[curr_y]) {
-                    left_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+                    left_line_list[curr_y] = Limit_uint8(CAMERA_LINE_X_MIN, curr_x, CAMERA_LINE_X_MAX);
                 }
             }
         }
 
-        if (curr_y <= search_end_line) break;
+        if (curr_y <= CAMERA_SEARCH_ROW_MIN) break;
 
         found = 0;
-        start_search = (curr_dir + 6) % 8; 
-        
+        start_search = (curr_dir + 6) % 8;
+
         for (i = 0; i < 6; i++) {
-            search_dir = (start_search + i) % 8; 
+            search_dir = (start_search + i) % 8;
             nx = curr_x + dir_x[search_dir];
             ny = curr_y + dir_y[search_dir];
 
-            if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
+            if (nx >= CAMERA_ROI_X_MIN && nx <= CAMERA_ROI_X_MAX && ny >= CAMERA_SEARCH_ROW_MIN && ny <= CAMERA_SEARCH_ROW_MAX) {
                 if (IS_WHITE(ny, nx)) {
-                    curr_x = nx; curr_y = ny; curr_dir = search_dir; found = 1; break;
+                    curr_x = nx;
+                    curr_y = ny;
+                    curr_dir = search_dir;
+                    found = 1;
+                    break;
                 }
             }
         }
-        
-        if (!found) { curr_y--; curr_dir = 0; }
+
+        if (!found) {
+            curr_y--;
+            curr_dir = 0;
+        }
     }
 
     /* ---------------- 右边缘八邻域爬行 ---------------- */
     curr_x = start_right_x;
     curr_y = start_y;
-    curr_dir = 0; 
+    curr_dir = 0;
 
     while (right_pts_cnt < MT9V03X_H * 3) {
         right_pts_x[right_pts_cnt] = curr_x;
@@ -390,98 +416,101 @@ void image_deal(void)
         right_pts_dir[right_pts_cnt] = curr_dir;
         right_pts_cnt++;
 
-        /* ?? 修复漏洞一：白点验真护甲！ */
         if (curr_y >= 0 && curr_y < MT9V03X_H) {
             if (IS_WHITE(curr_y, curr_x)) {
                 if (right_line_list[curr_y] == 255 || curr_x > right_line_list[curr_y]) {
-                    right_line_list[curr_y] = Limit_uint8(1, curr_x, MT9V03X_W - 2);
+                    right_line_list[curr_y] = Limit_uint8(CAMERA_LINE_X_MIN, curr_x, CAMERA_LINE_X_MAX);
                 }
             }
         }
 
-        if (curr_y <= search_end_line) break;
+        if (curr_y <= CAMERA_SEARCH_ROW_MIN) break;
 
         found = 0;
-        start_search = (curr_dir + 2) % 8; 
-        
+        start_search = (curr_dir + 2) % 8;
+
         for (i = 0; i < 6; i++) {
-            search_dir = (start_search + 8 - i) % 8; 
+            search_dir = (start_search + 8 - i) % 8;
             nx = curr_x + dir_x[search_dir];
             ny = curr_y + dir_y[search_dir];
 
-            if (nx >= 1 && nx <= MT9V03X_W - 2 && ny >= search_end_line && ny < MT9V03X_H) {
+            if (nx >= CAMERA_ROI_X_MIN && nx <= CAMERA_ROI_X_MAX && ny >= CAMERA_SEARCH_ROW_MIN && ny <= CAMERA_SEARCH_ROW_MAX) {
                 if (IS_WHITE(ny, nx)) {
-                    curr_x = nx; curr_y = ny; curr_dir = search_dir; found = 1; break;
+                    curr_x = nx;
+                    curr_y = ny;
+                    curr_dir = search_dir;
+                    found = 1;
+                    break;
                 }
             }
         }
-        
-        if (!found) { curr_y--; curr_dir = 0; }
+
+        if (!found) {
+            curr_y--;
+            curr_dir = 0;
+        }
     }
 
     /* ---------------- 赛道空缺填补 (斜率顺延法取代垂直拉伸) ---------------- */
-    for (i = search_start_line - 1; i > search_end_line; i--) {
-        
-        /* ?? 修复漏洞二：左线斜率动态顺延 */
+    for (i = CAMERA_SEARCH_ROW_MAX; i >= CAMERA_SEARCH_ROW_MIN; i--) {
         if (left_line_list[i] == 255) {
-            if (i < search_start_line - 1) {
-                // 提取下方最后 5 个合法点的斜率，顺着真实的弯曲趋势往上补！
+            if (i < CAMERA_SEARCH_ROW_MAX) {
                 if (l_valid_y == -1) {
                     l_valid_y = i + 1;
                     if (l_valid_y + 5 < MT9V03X_H && left_line_list[l_valid_y + 5] != 255) {
                         l_slope = ((left_line_list[l_valid_y] - left_line_list[l_valid_y + 5]) << 8) / 5;
-                    } else { l_slope = 0; }
+                    } else {
+                        l_slope = 0;
+                    }
                 }
                 new_x = left_line_list[l_valid_y] + ((l_slope * (l_valid_y - i)) >> 8);
-                left_line_list[i] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+                left_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
             } else {
-                left_line_list[i] = 1;
+                left_line_list[i] = CAMERA_LINE_X_MIN;
             }
         } else {
-            l_valid_y = -1; // 遇到健康点，重置锚点
+            l_valid_y = -1;
         }
 
-        /* ?? 修复漏洞二：右线斜率动态顺延 */
         if (right_line_list[i] == 255) {
-            if (i < search_start_line - 1) {
+            if (i < CAMERA_SEARCH_ROW_MAX) {
                 if (r_valid_y == -1) {
                     r_valid_y = i + 1;
                     if (r_valid_y + 5 < MT9V03X_H && right_line_list[r_valid_y + 5] != 255) {
                         r_slope = ((right_line_list[r_valid_y] - right_line_list[r_valid_y + 5]) << 8) / 5;
-                    } else { r_slope = 0; }
+                    } else {
+                        r_slope = 0;
+                    }
                 }
                 new_x = right_line_list[r_valid_y] + ((r_slope * (r_valid_y - i)) >> 8);
-                right_line_list[i] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+                right_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
             } else {
-                right_line_list[i] = MT9V03X_W - 2;
+                right_line_list[i] = CAMERA_LINE_X_MAX;
             }
         } else {
-            r_valid_y = -1; 
+            r_valid_y = -1;
         }
 
         left_line_raw[i] = left_line_list[i];
 
-        /* ?? 修复漏洞三：去除了粗暴的防串线置 1 逻辑，改用柔和限幅 */
         if (left_line_list[i] >= right_line_list[i] - 3) {
             int mid_temp = (left_line_list[i] + right_line_list[i]) / 2;
-            left_line_list[i] = Limit_uint8(1, mid_temp - 2, MT9V03X_W - 2);
-            right_line_list[i] = Limit_uint8(1, mid_temp + 2, MT9V03X_W - 2);
+            left_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, mid_temp - 2, CAMERA_LINE_X_MAX);
+            right_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, mid_temp + 2, CAMERA_LINE_X_MAX);
         }
 
-        /* 中线单边补偿计算 */
         {
-            int half_track = 50; 
-            if (left_line_list[i] <= 2 && right_line_list[i] < MT9V03X_W - 5) {
-                mid_line_list[i] = Limit_uint8(1, right_line_list[i] - half_track, MT9V03X_W - 2);
-            } else if (right_line_list[i] >= MT9V03X_W - 3 && left_line_list[i] > 2) {
-                mid_line_list[i] = Limit_uint8(1, left_line_list[i] + half_track, MT9V03X_W - 2);
+            int half_track = 50;
+            if (left_line_list[i] <= CAMERA_LINE_X_MIN + 1 && right_line_list[i] < CAMERA_LINE_X_MAX - 3) {
+                mid_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, right_line_list[i] - half_track, CAMERA_LINE_X_MAX);
+            } else if (right_line_list[i] >= CAMERA_LINE_X_MAX - 1 && left_line_list[i] > CAMERA_LINE_X_MIN + 1) {
+                mid_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, left_line_list[i] + half_track, CAMERA_LINE_X_MAX);
             } else {
-                mid_line_list[i] = Limit_uint8(1, (left_line_list[i] + right_line_list[i]) / 2, MT9V03X_W - 2);
+                mid_line_list[i] = Limit_uint8(CAMERA_LINE_X_MIN, (left_line_list[i] + right_line_list[i]) / 2, CAMERA_LINE_X_MAX);
             }
         }
     }
 }
-
 
 
 /* =======================================================================
@@ -490,40 +519,26 @@ void image_deal(void)
  * ======================================================================= */
 void median_filter_lines(void)
 {
-    /* ------------------------------------------------
-     * ??? 严格 C89 标准：变量声明置顶
-     * ------------------------------------------------ */
     int y, i, j;
     uint8 temp;
-    uint8 window[5]; // 5点滑动窗口
-    
-    // 备份当前边线 (滤波必须依赖原始数据，不能边滤边覆盖)
+    uint8 window[5];
     uint8 l_temp[MT9V03X_H];
     uint8 r_temp[MT9V03X_H];
-    
-    // 1. 拷贝当前帧的粗糙边线
+
     for (y = 0; y < MT9V03X_H; y++) {
         l_temp[y] = left_line_list[y];
         r_temp[y] = right_line_list[y];
     }
 
-    /* ==========================================
-     * 2. 对左线进行 5 点极速中值滤波 
-     * ========================================== */
-    // 首尾各留2行不处理，防止数组越界
-    for (y = search_end_line + 2; y < search_start_line - 2; y++) {
-        
-        // 遇到丢线的废点 (贴紧屏幕边缘) 直接跳过，不参与滤波
-        if (l_temp[y] <= 2 || l_temp[y] >= MT9V03X_W - 2) continue;
+    for (y = CAMERA_SEARCH_ROW_MIN + 2; y <= CAMERA_SEARCH_ROW_MAX - 2; y++) {
+        if (l_temp[y] <= CAMERA_LINE_X_MIN + 1 || l_temp[y] >= CAMERA_LINE_X_MAX - 1) continue;
 
-        // 提取上下共 5 个点的 X 坐标
         window[0] = l_temp[y - 2];
         window[1] = l_temp[y - 1];
         window[2] = l_temp[y];
         window[3] = l_temp[y + 1];
         window[4] = l_temp[y + 2];
 
-        // 极简冒泡排序 (只有 5 个数，极其神速)
         for (i = 0; i < 4; i++) {
             for (j = 0; j < 4 - i; j++) {
                 if (window[j] > window[j + 1]) {
@@ -533,16 +548,11 @@ void median_filter_lines(void)
                 }
             }
         }
-        // 取排序后的正中间值(第3个)，覆盖回原数组
-        left_line_list[y] = window[2]; 
+        left_line_list[y] = window[2];
     }
 
-    /* ==========================================
-     * 3. 对右线进行 5 点极速中值滤波 (镜像逻辑)
-     * ========================================== */
-    for (y = search_end_line + 2; y < search_start_line - 2; y++) {
-        
-        if (r_temp[y] <= 2 || r_temp[y] >= MT9V03X_W - 2) continue;
+    for (y = CAMERA_SEARCH_ROW_MIN + 2; y <= CAMERA_SEARCH_ROW_MAX - 2; y++) {
+        if (r_temp[y] <= CAMERA_LINE_X_MIN + 1 || r_temp[y] >= CAMERA_LINE_X_MAX - 1) continue;
 
         window[0] = r_temp[y - 2];
         window[1] = r_temp[y - 1];
@@ -559,15 +569,12 @@ void median_filter_lines(void)
                 }
             }
         }
-        right_line_list[y] = window[2]; 
+        right_line_list[y] = window[2];
     }
-    
-    /* ==========================================
-     * 4. 边线变平滑了，立刻重算一下中线！
-     * ========================================== */
-    for (y = search_end_line + 2; y < search_start_line - 2; y++) {
-        if (left_line_list[y] > 2 && right_line_list[y] < MT9V03X_W - 2) {
-            mid_line_list[y] = Limit_uint8(1, (left_line_list[y] + right_line_list[y]) / 2, MT9V03X_W - 2);
+
+    for (y = CAMERA_SEARCH_ROW_MIN + 2; y <= CAMERA_SEARCH_ROW_MAX - 2; y++) {
+        if (left_line_list[y] > CAMERA_LINE_X_MIN + 1 && right_line_list[y] < CAMERA_LINE_X_MAX - 1) {
+            mid_line_list[y] = Limit_uint8(CAMERA_LINE_X_MIN, (left_line_list[y] + right_line_list[y]) / 2, CAMERA_LINE_X_MAX);
         }
     }
 }
@@ -752,19 +759,19 @@ void zuohuan(void)
         for (y = search_start; y > search_end; y--) {
             
             // 排除掉因为丢失而变成 1 的废点
-            if (left_line_list[y] <= 2) continue;
+            if (left_line_list[y] <= CAMERA_LINE_X_MIN + 1) continue;
 
             // 寻找最靠右的局部极值 (凸起)
             if (left_line_list[y] > max_x) {
                 
                 // 【核心绝杀：V 型夹角特征验证】
-                x_above = (y - 7 > 0) ? left_line_list[y - 7] : 1;
-                x_below = (y + 5 < MT9V03X_H) ? left_line_list[y + 5] : 1;
+                x_above = (y - 7 > 0) ? left_line_list[y - 7] : CAMERA_LINE_X_MIN;
+                x_below = (y + 5 < MT9V03X_H) ? left_line_list[y + 5] : CAMERA_LINE_X_MIN;
                 
                 // 判断：比上方突出 5 像素，比下方突出 3 像素
                 if (left_line_list[y] > x_above + 5 && left_line_list[y] > x_below + 3) {
                     // 并且确保它不是在屏幕最左边蹭来蹭去的噪点
-                    if (left_line_list[y] > 5) { 
+                    if (left_line_list[y] > CAMERA_LINE_X_MIN + 3) { 
                         max_x = left_line_list[y];
                         a_point_y = y;
                     }
@@ -801,15 +808,15 @@ void zuohuan(void)
 						if (y_ref >= MT9V03X_H) y_ref = MT9V03X_H - 1;
 
 						x_ref = left_line_list[y_ref];
-						if (x_ref <= 1 || x_ref >= MT9V03X_W - 2) {
+						if (x_ref <= CAMERA_LINE_X_MIN || x_ref >= CAMERA_LINE_X_MAX) {
 								idx_A = -1; // 左线无效，避免斜率乱飞
 						}
 				}
         k_slope = ((pt_down_x - x_ref) << 8) / (pt_down_y - y_ref); 
         for (y = pt_down_y - 2; y > 10; y--) {
             predict_x = pt_down_x + ((k_slope * (y - pt_down_y))>>8);
-            if (predict_x < 3) predict_x = 3;
-            if (predict_x > MT9V03X_W - 2) predict_x = MT9V03X_W - 2;
+            if (predict_x < CAMERA_LINE_X_MIN + 2) predict_x = CAMERA_LINE_X_MIN + 2;
+            if (predict_x > CAMERA_LINE_X_MAX) predict_x = CAMERA_LINE_X_MAX;
             
             /* 【修改点 1】：使用 STABLE 宏，要求必须是一块实心的黑色区域才登陆 */
             if (IS_BLACK_STABLE(y, predict_x) && IS_BLACK_STABLE(y, predict_x - 2)) {
@@ -826,9 +833,9 @@ void zuohuan(void)
 
         for (y = scan_down; y >= scan_up; y--) {
             int start_x = last_B_x + 30; 
-            if (start_x > MT9V03X_W - 5) start_x = MT9V03X_W - 5;
+            if (start_x > CAMERA_LINE_X_MAX - 3) start_x = CAMERA_LINE_X_MAX - 3;
 
-            for (predict_x = start_x; predict_x > 5; predict_x--) {
+            for (predict_x = start_x; predict_x > CAMERA_LINE_X_MIN + 3; predict_x--) {
                 
                 /* 【修改点 2】：右边必须是坚实的白赛道，左边必须是坚实的黑岛屿。
                    彻底免疫赛道里的一粒黑灰，或者岛屿边上的一粒白反光！ */
@@ -1170,7 +1177,7 @@ void zuohuan(void)
 
         for (y = MT9V03X_H - 15; y >= 20; y--) {
             curr_x = left_line_list[y];
-            if (curr_x > 1 && curr_x < MT9V03X_W - 5) {
+            if (curr_x > CAMERA_LINE_X_MIN && curr_x < CAMERA_LINE_X_MAX - 3) {
                 if (curr_x < trough_x) {
                     trough_x = curr_x;
                     trough_y = y;
@@ -1181,7 +1188,7 @@ void zuohuan(void)
         if (trough_y != -1) {
             for (y = trough_y; y >= 15; y--) {
                 curr_x = left_line_list[y];
-                if (curr_x > peak_x && curr_x < MT9V03X_W - 5) {
+                if (curr_x > peak_x && curr_x < CAMERA_LINE_X_MAX - 3) {
                     peak_x = curr_x;
                     peak_y = y;
                 }
@@ -1215,7 +1222,7 @@ void patch_roundabout(void)
             slope = (((int)pt_down_x - (int)pt_mid_x) << 8) / ((int)pt_down_y - (int)pt_mid_y);
 						for (r = pt_down_y; r >= (int)pt_mid_y; r--) {
 								new_x = (int)pt_down_x - ((slope * ((int)pt_down_y - r)) >> 8);
-								left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+								left_line_list[r] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
             }
         }
@@ -1224,10 +1231,10 @@ void patch_roundabout(void)
     // --- 状态 2：A 消失，从 B 点直接连到屏幕左下角 ---
     else if (roundabout_state == R_A_LOST) {
         if (pt_mid_x > 0 && pt_mid_y < MT9V03X_H - 1) { 
-            slope = ((1 - (int)pt_mid_x) << 8) / ((MT9V03X_H - 1) - (int)pt_mid_y);
+            slope = ((CAMERA_LINE_X_MIN - (int)pt_mid_x) << 8) / ((MT9V03X_H - 1) - (int)pt_mid_y);
 						for (r = pt_mid_y; r < MT9V03X_H; r++) {
 								new_x = (int)pt_mid_x + ((slope * (r - (int)pt_mid_y)) >> 8);
-                left_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+                left_line_list[r] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
             }
         }
@@ -1255,7 +1262,7 @@ void patch_roundabout(void)
                 }
                 
                 /* Limit_uint8 保护，防止越界 */
-                right_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+                right_line_list[r] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
                 
                 /* 重新计算这一行的中线，引导舵机暴躁入环 */
                 mid_line_list[r] = (left_line_list[r] + right_line_list[r]) / 2;
@@ -1274,20 +1281,20 @@ void patch_roundabout(void)
                  * 1. 绿线：60度角左上强拉 
                  * ========================================== */
                 new_x = (int)exit_pt_x - (((int)exit_pt_y - r) * 7) / 4;
-                right_line_list[r] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+                right_line_list[r] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
                 
                 /* ==========================================
                  * 2. 蓝线：放弃寻线，直接锁死在屏幕最左侧！
                  * (假设 1 是你屏幕最左边的有效坐标)
                  * ========================================== */
-                left_line_list[r] = 1; 
+                left_line_list[r] = CAMERA_LINE_X_MIN; 
                 
                 /* ==========================================
                  * 3. 极简截断保护
                  * ========================================== */
                 /* 如果右边切进来的绿线，已经撞到了屏幕最左侧(和蓝线重合了)，
                    说明这个出岛的“漏斗”已经闭合了，上面的部分没必要再算了！ */
-                if (right_line_list[r] <= 2) {
+                if (right_line_list[r] <= CAMERA_LINE_X_MIN + 1) {
                     break; 
                 }
 
@@ -1313,7 +1320,7 @@ void patch_roundabout(void)
          * ========================================== */
         for (y = MT9V03X_H - 15; y >= 20; y--) {
             int curr_x = left_line_list[y];
-            if (curr_x > 1 && curr_x < MT9V03X_W - 5) {
+            if (curr_x > CAMERA_LINE_X_MIN && curr_x < CAMERA_LINE_X_MAX - 3) {
                 if (curr_x < trough_x) {
                     trough_x = curr_x;
                     trough_y = y;
@@ -1325,7 +1332,7 @@ void patch_roundabout(void)
             // 往下找下波峰
             for (y = trough_y; y <= MT9V03X_H - 5; y++) {
                 int curr_x = left_line_list[y];
-                if (curr_x > pt_down_x && curr_x < MT9V03X_W - 5) {
+                if (curr_x > pt_down_x && curr_x < CAMERA_LINE_X_MAX - 3) {
                     pt_down_x = curr_x;
                     pt_down_y = y;
                 }
@@ -1334,7 +1341,7 @@ void patch_roundabout(void)
             // 往上找上波峰
             for (y = trough_y; y >= 15; y--) {
                 int curr_x = left_line_list[y];
-                if (curr_x > pt_up_x && curr_x < MT9V03X_W - 5) {
+                if (curr_x > pt_up_x && curr_x < CAMERA_LINE_X_MAX - 3) {
                     pt_up_x = curr_x;
                     pt_up_y = y;
                 }
@@ -1358,7 +1365,7 @@ void patch_roundabout(void)
             if (draw_flag == 0 && pt_up_y != -1 && (pt_up_x - trough_x >= 4)) {
                 
                 // 【核心兜底】：强行把下方波峰的锚点，拉到屏幕的最左下角！
-                pt_down_x = 1;                  // 屏幕最左边缘 (防止越界用 1)
+                pt_down_x = CAMERA_LINE_X_MIN;                  // ROI 左边缘
                 pt_down_y = MT9V03X_H - 1;      // 屏幕最底端
                 
                 draw_flag = 1; // 满足单峰兜底条件，准备强行画线
@@ -1379,7 +1386,7 @@ void patch_roundabout(void)
                     int new_x = pt_up_x + (dx * (y - pt_up_y)) / dy;
                     
                     // 刷新蓝线，并做好安全限制
-                    left_line_list[y] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+                    left_line_list[y] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
                     
                     // 重新计算被刷新这一段的中线 (红线)
                     mid_line_list[y] = (left_line_list[y] + right_line_list[y]) / 2;
@@ -1418,7 +1425,7 @@ void patch_crossroad(void)
      * ========================================== */
     // A. 找下断点 (掉入深渊前的那一步)
     for (y = MT9V03X_H - 5; y >= 20; y--) {
-        if (left_line_list[y] <= 5 && left_line_list[y+1] > 5) {
+        if (left_line_list[y] <= CAMERA_LINE_X_MIN + 4 && left_line_list[y+1] > CAMERA_LINE_X_MIN + 4) {
             l_dn_y = y + 1;
             
             /* ??【核心修复】：切除爬虫的“内弯钩子”！
@@ -1441,7 +1448,7 @@ void patch_crossroad(void)
 
         // 向上寻找上断点 (爬出深渊的第一步)
         for (y = l_dn_y - 5; y >= 5; y--) {
-            if (left_line_list[y] > 5 && left_line_list[y+1] <= 5) {
+            if (left_line_list[y] > CAMERA_LINE_X_MIN + 4 && left_line_list[y+1] <= CAMERA_LINE_X_MIN + 4) {
                 
                 // ??【向量衍生预判】：算一算顺着下方的走势，这个高度的 X 理论上应该在哪？
                 pred_x = left_line_list[l_dn_y] + ((slope_int * (l_dn_y - y)) >> 8);
@@ -1463,7 +1470,7 @@ void patch_crossroad(void)
         if (l_up_y == -1) {
             l_up_y = 10;
             left_line_list[l_up_y] = left_line_list[l_dn_y] + ((slope_int * (l_dn_y - 10)) >> 8);
-            left_line_list[l_up_y] = Limit_uint8(1, left_line_list[l_up_y], MT9V03X_W - 2);
+            left_line_list[l_up_y] = Limit_uint8(CAMERA_LINE_X_MIN, left_line_list[l_up_y], CAMERA_LINE_X_MAX);
         }
     }
 
@@ -1471,7 +1478,7 @@ void patch_crossroad(void)
      * 2. 右边线：镜像处理
      * ========================================== */
     for (y = MT9V03X_H - 5; y >= 20; y--) {
-        if (right_line_list[y] >= MT9V03X_W - 5 && right_line_list[y+1] < MT9V03X_W - 5) {
+        if (right_line_list[y] >= CAMERA_LINE_X_MAX - 3 && right_line_list[y+1] < CAMERA_LINE_X_MAX - 3) {
             r_dn_y = y + 1;
             
             /* ??【核心修复】：切除右侧的内弯钩子 */
@@ -1488,7 +1495,7 @@ void patch_crossroad(void)
         slope_int = (dx << 8) / 10; 
 
         for (y = r_dn_y - 5; y >= 5; y--) {
-            if (right_line_list[y] < MT9V03X_W - 5 && right_line_list[y+1] >= MT9V03X_W - 5) {
+            if (right_line_list[y] < CAMERA_LINE_X_MAX - 3 && right_line_list[y+1] >= CAMERA_LINE_X_MAX - 3) {
                 
                 // ?? 右侧向量衍生预判
                 pred_x = right_line_list[r_dn_y] + ((slope_int * (r_dn_y - y)) >> 8);
@@ -1506,7 +1513,7 @@ void patch_crossroad(void)
         if (r_up_y == -1) {
             r_up_y = 10;
             right_line_list[r_up_y] = right_line_list[r_dn_y] + ((slope_int * (r_dn_y - 10)) >> 8);
-            right_line_list[r_up_y] = Limit_uint8(1, right_line_list[r_up_y], MT9V03X_W - 2);
+            right_line_list[r_up_y] = Limit_uint8(CAMERA_LINE_X_MIN, right_line_list[r_up_y], CAMERA_LINE_X_MAX);
         }
     }
 
@@ -1521,7 +1528,7 @@ void patch_crossroad(void)
         
         for (y = l_dn_y - 1; y > l_up_y; y--) {
             new_x = left_line_list[l_dn_y] + ((slope_int * (l_dn_y - y)) >> 8);
-            left_line_list[y] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+            left_line_list[y] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
         }
         patch_start_y = (patch_start_y > l_dn_y) ? patch_start_y : l_dn_y;
         patch_end_y   = (patch_end_y < l_up_y) ? patch_end_y : l_up_y;
@@ -1535,7 +1542,7 @@ void patch_crossroad(void)
         
         for (y = r_dn_y - 1; y > r_up_y; y--) {
             new_x = right_line_list[r_dn_y] + ((slope_int * (r_dn_y - y)) >> 8);
-            right_line_list[y] = Limit_uint8(1, new_x, MT9V03X_W - 2);
+            right_line_list[y] = Limit_uint8(CAMERA_LINE_X_MIN, new_x, CAMERA_LINE_X_MAX);
         }
         patch_start_y = (patch_start_y > r_dn_y) ? patch_start_y : r_dn_y;
         patch_end_y   = (patch_end_y < r_up_y) ? patch_end_y : r_up_y;
@@ -1544,7 +1551,7 @@ void patch_crossroad(void)
     // --- 重新融合被覆盖区段的中线 ---
     if (patch_start_y > 0 && patch_start_y > patch_end_y) {
         for (y = patch_start_y; y >= patch_end_y; y--) {
-            mid_line_list[y] = Limit_uint8(1, (left_line_list[y] + right_line_list[y]) / 2, MT9V03X_W - 2);
+            mid_line_list[y] = Limit_uint8(CAMERA_LINE_X_MIN, (left_line_list[y] + right_line_list[y]) / 2, CAMERA_LINE_X_MAX);
         }
     }
 }
@@ -1573,9 +1580,9 @@ static int avg_mid_window(int center_row, int radius)
     int sum_mid;
     int cnt;
 
-    center_row = clamp_i(center_row, search_end_line + 1, search_start_line - 1);
-    start_row = clamp_i(center_row - radius, search_end_line + 1, search_start_line - 1);
-    end_row = clamp_i(center_row + radius, search_end_line + 1, search_start_line - 1);
+    center_row = clamp_i(center_row, CAMERA_SEARCH_ROW_MIN, CAMERA_SEARCH_ROW_MAX);
+    start_row = clamp_i(center_row - radius, CAMERA_SEARCH_ROW_MIN, CAMERA_SEARCH_ROW_MAX);
+    end_row = clamp_i(center_row + radius, CAMERA_SEARCH_ROW_MIN, CAMERA_SEARCH_ROW_MAX);
 
     sum_mid = 0;
     cnt = 0;
@@ -1597,13 +1604,13 @@ static int fixed_row_bias_mid(int startline, int endline)
     int cnt;
     int mid;
 
-    startline = clamp_i(startline, search_end_line + 1, search_start_line - 1);
-    endline = clamp_i(endline, search_end_line, startline - 1);
+    startline = clamp_i(startline, CAMERA_SEARCH_ROW_MIN, CAMERA_SEARCH_ROW_MAX);
+    endline = clamp_i(endline, CAMERA_SEARCH_ROW_MIN - 1, startline - 1);
     sum_mid = 0;
     cnt = 0;
 
     for (row = startline; row > endline; row--) {
-        mid = clamp_i(mid_line_list[row], 1, MT9V03X_W - 2);
+        mid = clamp_i(mid_line_list[row], CAMERA_LINE_X_MIN, CAMERA_LINE_X_MAX);
         if (!pixel_is_white_safe(row, mid)) {
             break;
         }
@@ -1634,15 +1641,15 @@ static int16 regression_slope_x10(int startline, int endline)
     float sum_down;
     float slope;
 
-    startline = clamp_i(startline, search_end_line + 1, search_start_line - 1);
-    endline = clamp_i(endline, search_end_line, startline - 1);
+    startline = clamp_i(startline, CAMERA_SEARCH_ROW_MIN, CAMERA_SEARCH_ROW_MAX);
+    endline = clamp_i(endline, CAMERA_SEARCH_ROW_MIN - 1, startline - 1);
     actual_endline = endline;
     sum_x = 0;
     sum_y = 0;
     cnt = 0;
 
     for (row = startline; row > endline; row--) {
-        if (!pixel_is_white_safe(row, clamp_i(mid_line_list[row], 1, MT9V03X_W - 2))) {
+        if (!pixel_is_white_safe(row, clamp_i(mid_line_list[row], CAMERA_LINE_X_MIN, CAMERA_LINE_X_MAX))) {
             actual_endline = row;
             break;
         }
@@ -1705,9 +1712,9 @@ static void update_camera_control_outputs(void)
     lost_left = 0;
     lost_right = 0;
 
-    for (row = search_start_line - 1; row > search_end_line; row--) {
-        left_ok = (uint8)((left_line_list[row] > 1) && (left_line_list[row] < MT9V03X_W - 2));
-        right_ok = (uint8)((right_line_list[row] > 1) && (right_line_list[row] < MT9V03X_W - 2));
+    for (row = CAMERA_SEARCH_ROW_MAX; row >= CAMERA_SEARCH_ROW_MIN; row--) {
+        left_ok = (uint8)((left_line_list[row] > CAMERA_LINE_X_MIN) && (left_line_list[row] < CAMERA_LINE_X_MAX));
+        right_ok = (uint8)((right_line_list[row] > CAMERA_LINE_X_MIN) && (right_line_list[row] < CAMERA_LINE_X_MAX));
         total_rows++;
         if (left_ok && right_ok) {
             valid_rows++;
@@ -1766,7 +1773,7 @@ uint8 find_mid_line_weight(void)
     uint32 weight_sum = 0;
     uint8 i;
 
-    for(i=MT9V03X_H-1; i>search_end_line; i--) {
+    for(i = CAMERA_SEARCH_ROW_MAX; i >= CAMERA_SEARCH_ROW_MIN; i--) {
         weight_midline_sum += mid_line_list[i] * mid_weight_list[i];
         weight_sum += mid_weight_list[i];
     }
@@ -1788,16 +1795,16 @@ void draw_line(void)
     int px, py,ax,ay;
     int d;
 
-    for(i = MT9V03X_H - 1; i>search_end_line; i--) {
-        px = (Limit_uint8(1,left_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
+    for(i = CAMERA_SEARCH_ROW_MAX; i >= CAMERA_SEARCH_ROW_MIN; i--) {
+        px = (Limit_uint8(CAMERA_LINE_X_MIN,left_line_list[i],CAMERA_LINE_X_MAX) * 9) >> 3; py = (i * 9) >> 3;
         ips200_draw_point(px, py, RGB565_BLUE);
         ips200_draw_point(px, py+1, RGB565_BLUE);
 
-        px = (Limit_uint8(1,right_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
+        px = (Limit_uint8(CAMERA_LINE_X_MIN,right_line_list[i],CAMERA_LINE_X_MAX) * 9) >> 3; py = (i * 9) >> 3;
         ips200_draw_point(px, py, RGB565_GREEN);
         ips200_draw_point(px, py+1, RGB565_GREEN);
 
-        px = (Limit_uint8(1,mid_line_list[i],MT9V03X_W-2) * 9) >> 3; py = (i * 9) >> 3;
+        px = (Limit_uint8(CAMERA_LINE_X_MIN,mid_line_list[i],CAMERA_LINE_X_MAX) * 9) >> 3; py = (i * 9) >> 3;
         ips200_draw_point(px, py, RGB565_RED);
         ips200_draw_point(px, py+1, RGB565_RED);
     }
