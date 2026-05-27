@@ -4,38 +4,111 @@
 #include "motor.h"
 #include "servo.h"
 #include "camera.h"
+#include "shoot.h"
 
-/* 开源风格控制：
- * 固定行段偏差 PD 控舵，编码器 PI 控速，弯道内轮减速。
+/* ===================== 底盘速度参数 =====================
+ * target_speed_base 是基础速度目标，单位是“5ms 内编码器计数”。
+ * 例：target_speed_base = 100，表示速度环每 5ms 希望编码器读数约为 100。
+ *
+ * target_speed_curve_min 是弯道最低目标速度。
+ * 当前使用参考工程 Dream_speed 同类思路：舵机打得越大，速度从 base 线性降到 curve_min。
+ * 调参建议：
+ * 1. 先把 80 跑稳，再提高 target_speed_base 到 100/120。
+ * 2. 如果高速入弯甩、满舵过弯吃力，先降低 target_speed_curve_min。
+ * 3. 如果弯道明显太慢、出弯拖沓，再提高 target_speed_curve_min。
  */
-#define MAX_SPEED_PULSES          4000
-#define BASE_SPEED_MATCH_GAIN     1.05f
+#define SPEED_TARGET_MIN          0
+#define SPEED_TARGET_MAX          900
+#define BASE_SPEED_MATCH_GAIN     1.00f
+#define CURVE_SPEED_MIN_DEFAULT   75
 
-#define SERVO_OUT_LIMIT_LEFT      (SERVO_CENTER - SERVO_L_MAX)
-#define SERVO_OUT_LIMIT_RIGHT     (SERVO_R_MAX - SERVO_CENTER)
-#define SERVO_DEADBAND_PIX        1.0f
+/* ===================== 舵机输出参数 =====================
+ * SERVO_OUT_LIMIT_LEFT/RIGHT 由 servo.h 的机械限幅自动换算而来。
+ * SERVO_DEADBAND_PIX 是视觉误差死区，误差小于该值时不打舵。
+ *   增大：直线更稳，但小偏差修正更迟钝。
+ *   减小：修正更灵敏，但直线更容易左右抖。
+ * SERVO_DUTY_STEP_DEG 是单次控制周期最大舵机变化量，限制舵机突变。
+ *   增大：入弯反应更快，但高速更容易甩。
+ *   减小：动作更柔和，但可能入弯晚。
+ * GYRO_STEER_LIMIT_DEG 是陀螺阻尼最大等效舵角，防止 gyro 项压过视觉。
+ */
+#define SERVO_OUT_LIMIT_LEFT      (SERVO_DUTY_CENTER - SERVO_DUTY_L_MAX)
+#define SERVO_OUT_LIMIT_RIGHT     (SERVO_DUTY_R_MAX - SERVO_DUTY_CENTER)
+#define SERVO_DEADBAND_PIX        2.0f
+#define SERVO_DUTY_STEP_DEG       5.0f
+#define STEER_OUT_STEP            (SERVO_DUTY_PER_DEGREE * SERVO_DUTY_STEP_DEG)
+#define GYRO_STEER_LIMIT_DEG      2.5f
+#define GYRO_STEER_LIMIT          (SERVO_DUTY_PER_DEGREE * GYRO_STEER_LIMIT_DEG)
 
-#define BIAS_FILTER_ALPHA         0.55f
-#define PREVIEW_FILTER_ALPHA      0.35f
+/* ===================== 左右轮差速参数 =====================
+ * 差速只跟舵机输出幅度有关，满舵时达到 DIFF_MAX_RATIO。
+ * DIFF_STEER_DEADBAND：小舵角内不差速，避免直线左右轮目标乱跳。
+ * DIFF_MAX_RATIO：
+ *   0.00 = 关闭差速，最接近借鉴工程当前实际运行方式。
+ *   0.10~0.20 = 温和差速，适合先稳定高速过弯。
+ *   0.30 以上 = 差速很强，可能帮助急弯，但也更容易甩尾和左右摆。
+ */
+//#define DIFF_STEER_DEADBAND       2.0f
+//#define DIFF_MAX_RATIO            0.2f
 
-#define SPEED_CURVE_START         4.0f
-#define SPEED_CURVE_K             0.020f
-#define SPEED_SCALE_MIN           0.45f
-#define SPEED_SCALE_MAX           1.00f
-#define SPEED_ACCEL_UP_ALPHA      0.05f
-#define SPEED_ACCEL_DOWN_ALPHA    0.45f
-#define LOW_CONF_TH               35
-#define LOW_CONF_SPEED_SCALE      0.70f
-
-#define DIFF_STEER_DEADBAND       2.0f
-#define DIFF_MAX_RATIO            0.32f
+/* ===================== 左右轮非对称差速参数 ===================== */
+#define DIFF_STEER_DEADBAND       2.0f   // 舵角死区，直道不差速
+// 差速系数分离：内轮负责“拽”车头（减速多），外轮负责维持动能（加速少）
+#define DIFF_RATIO_INNER          0.30f  // 内轮最大减速比例 (相当于旧工程的 kp_dif_jian)
+#define DIFF_RATIO_OUTER          0.10f  // 外轮最大加速比例 (相当于旧工程的 kp_dif_jia)
 
 volatile uint8 print_flag = 0;
+volatile int16 imu_gyro_z_dps_x10 = 0;
+volatile int16 control_debug_preview_raw = 0;
+volatile int16 control_debug_near_bias_raw = 0;
+volatile int16 control_debug_used_bias_x10 = 0;
+volatile int16 control_debug_preview_filtered_x10 = 0;
+volatile int16 control_debug_preview_far_raw = 0;
+volatile int16 control_debug_curve_raw = 0;
+volatile int16 control_debug_steer_p_x100 = 0;
+volatile int16 control_debug_steer_kp2_x100 = 0;
+volatile int16 control_debug_steer_ff_x100 = 0;
+volatile int16 control_debug_steer_out_x100 = 0;
+volatile int16 control_debug_left_target = 0;
+volatile int16 control_debug_right_target = 0;
+volatile int16 control_debug_left_speed = 0;
+volatile int16 control_debug_right_speed = 0;
+volatile int16 control_debug_diff_speed = 0;
+volatile int16 control_debug_left_pwm = 0;
+volatile int16 control_debug_right_pwm = 0;
+volatile uint8 control_debug_camera_confidence = 0;
+volatile uint8 control_debug_valid_line_cnt = 0;
+volatile uint8 control_debug_lost_left_cnt = 0;
+volatile uint8 control_debug_lost_right_cnt = 0;
+volatile uint8 control_debug_curve_exit_hold_cnt = 0;
+volatile int16 control_debug_speed_scale_x100 = 0;
+volatile uint8 control_debug_route_mode = 0;
+volatile uint8 control_debug_cross_state = 0;
+volatile uint8 control_debug_cross_left_open_cnt = 0;
+volatile uint8 control_debug_cross_right_open_cnt = 0;
+volatile uint8 control_debug_cross_both_open_cnt = 0;
+volatile uint8 control_debug_left_control = 0;
+volatile uint8 control_debug_right_control = 0;
+volatile uint8 control_debug_mid_control = 0;
+volatile uint8 control_debug_ring_midpoint = 0;
+volatile uint8 control_debug_ring_mid_under = 0;
+volatile uint8 control_debug_ring_left115 = 0;
+volatile uint8 control_debug_ring_left85 = 0;
+volatile uint8 control_debug_ring_left55 = 0;
 
-int target_speed_base = 15;
-float servo_kp = 0.38f;
-float servo_kd = 0.14f;
-float servo_kff = 0.16f;
+/* 基础速度目标，单位：5ms 编码器计数。调高速主要改这里。 */
+int target_speed_base = 90;
+/* 弯道最低速度目标。base 提到 100/120 后，可先保持 80。 */
+int target_speed_curve_min = CURVE_SPEED_MIN_DEFAULT;
+
+/* 舵机一次项增益：越大越灵敏，过大表现为 steer_out 经常打到限幅。 */
+float servo_kp = 2.5f;
+/* 舵机二次项增益：大误差时额外加舵，小误差影响小；过大容易入弯突然打死。 */
+float servo_kp2 = 0.01f;
+/* 陀螺阻尼增益：imu660ra_gyro_z > 0 为右转，当前公式用正 kg 抑制车头转动。 */
+float servo_kg = 0.002f;
+
+static float steer_out_last = 0.0f;
 
 static float abs_f(float x)
 {
@@ -49,83 +122,72 @@ static float clamp_f(float x, float min_v, float max_v)
     return x;
 }
 
+static int clamp_i(int x, int min_v, int max_v)
+{
+    if (x < min_v) return min_v;
+    if (x > max_v) return max_v;
+    return x;
+}
+
 static float clamp_steer_f(float x)
 {
-    if (x > SERVO_OUT_LIMIT_RIGHT) return SERVO_OUT_LIMIT_RIGHT;
-    if (x < -SERVO_OUT_LIMIT_LEFT) return -SERVO_OUT_LIMIT_LEFT;
+    if (x > SERVO_OUT_LIMIT_LEFT) return SERVO_OUT_LIMIT_LEFT;
+    if (x < -SERVO_OUT_LIMIT_RIGHT) return -SERVO_OUT_LIMIT_RIGHT;
     return x;
 }
 
 static float steer_limit_for_side(float steer)
 {
-    if (steer >= 0.0f) return SERVO_OUT_LIMIT_RIGHT;
-    return SERVO_OUT_LIMIT_LEFT;
+    if (steer >= 0.0f) return SERVO_OUT_LIMIT_LEFT;
+    return SERVO_OUT_LIMIT_RIGHT;
 }
 
 void control_init(void)
 {
-    left_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
-    right_motor_speed_pid_init(0.10f, 0.002f, 0.0f, 90, 90);
+    left_motor_speed_pid_init(0.10f, 0.003f, 0.0f, 0, 90);
+    right_motor_speed_pid_init(0.10f, 0.003f, 0.0f, 0, 90);
+    servo_set_angle(SERVO_CENTER);
 }
 
 void control_loop(void)
 {
-    static uint8 loop_cnt = 0;
-    static uint8 filter_init = 0;
-    static uint8 speed_filter_init = 0;
-    static float bias_filtered = 0.0f;
-    static float preview_filtered = 0.0f;
-    static float target_pulses_smooth = 0.0f;
-    static float error_last = 0.0f;
-
     int bias_raw;
     int preview_raw;
     int preview_far_raw;
     int curve_raw;
     float error;
-    float error_delta;
+    float gyro_z_dps;
+    float gyro_z_raw;
+    float steer_p_term;
+    float steer_kp2_term;
+    float steer_gyro_term;
     float steer_out;
+    float steer_step;
     float abs_steer;
+    float abs_steer_deg;
     float steer_limit;
-
+    float curve_ratio;
     int base_pulses;
-    float curve_score;
-    float speed_scale;
-    float speed_alpha;
-    int target_pulses_expect;
+    int curve_min_pulses;
     int target_pulses;
     int diff_speed;
     int left_target_pulses;
     int right_target_pulses;
+    int speed_scale_x100;
+		int diff_speed_inner = 0;
+    int diff_speed_outer = 0;
 
-    bias_raw = (int)camera_bias_raw;
-    if (bias_raw > 90) bias_raw = 90;
-    if (bias_raw < -90) bias_raw = -90;
+    imu660ra_get_gyro();
+    gyro_z_dps = imu660ra_gyro_transition(imu660ra_gyro_z);
+    gyro_z_raw = (float)imu660ra_gyro_z;
+    imu_gyro_z_dps_x10 = (int16)(gyro_z_dps * 10.0f);
 
-    preview_raw = (int)camera_preview_raw;
-    if (preview_raw > 90) preview_raw = 90;
-    if (preview_raw < -90) preview_raw = -90;
+    bias_raw = clamp_i((int)camera_bias_raw, -90, 90);
+    preview_raw = clamp_i((int)camera_preview_raw, -90, 90);
+    preview_far_raw = clamp_i((int)camera_preview_far_raw, -90, 90);
+    curve_raw = clamp_i((int)camera_curve_raw, -90, 90);
 
-    preview_far_raw = (int)camera_preview_far_raw;
-    if (preview_far_raw > 90) preview_far_raw = 90;
-    if (preview_far_raw < -90) preview_far_raw = -90;
-
-    curve_raw = (int)camera_curve_raw;
-    if (curve_raw > 90) curve_raw = 90;
-    if (curve_raw < -90) curve_raw = -90;
-
-    if (!filter_init)
-    {
-        bias_filtered = (float)bias_raw;
-        preview_filtered = (float)preview_raw;
-        error_last = 0.0f;
-        filter_init = 1;
-    }
-
-    bias_filtered = bias_filtered * (1.0f - BIAS_FILTER_ALPHA) + (float)bias_raw * BIAS_FILTER_ALPHA;
-    preview_filtered = preview_filtered * (1.0f - PREVIEW_FILTER_ALPHA) + (float)preview_raw * PREVIEW_FILTER_ALPHA;
-
-    error = bias_filtered;
+    error = (float)preview_raw;
     if ((error <= SERVO_DEADBAND_PIX) && (error >= -SERVO_DEADBAND_PIX))
     {
         error = 0.0f;
@@ -139,84 +201,95 @@ void control_loop(void)
         error += SERVO_DEADBAND_PIX;
     }
 
-    error_delta = error - error_last;
-    error_last = error;
+    steer_p_term = servo_kp * error;
+    steer_kp2_term = servo_kp2 * error * abs_f(error);
+    steer_gyro_term = clamp_f(-gyro_z_raw * servo_kg, -GYRO_STEER_LIMIT, GYRO_STEER_LIMIT);
+    steer_out = clamp_steer_f(steer_p_term + steer_kp2_term + steer_gyro_term);
 
-    steer_out = (-servo_kp * error) - (servo_kd * error_delta) + (servo_kff * preview_filtered);
+    steer_step = steer_out - steer_out_last;
+    if (steer_step > STEER_OUT_STEP)
+    {
+        steer_out = steer_out_last + STEER_OUT_STEP;
+    }
+    else if (steer_step < -STEER_OUT_STEP)
+    {
+        steer_out = steer_out_last - STEER_OUT_STEP;
+    }
     steer_out = clamp_steer_f(steer_out);
-    servo_set_angle(SERVO_CENTER + steer_out);
-
-    base_pulses = (int)((float)(((long)target_speed_base * MAX_SPEED_PULSES) / 90) * BASE_SPEED_MATCH_GAIN);
-
-    curve_score = abs_f(preview_filtered) +
-                  0.45f * abs_f((float)preview_far_raw) +
-                  0.35f * abs_f((float)curve_raw) +
-                  0.70f * abs_f(steer_out);
-
-    if (curve_score <= SPEED_CURVE_START)
-    {
-        speed_scale = SPEED_SCALE_MAX;
-    }
-    else
-    {
-        speed_scale = SPEED_SCALE_MAX - (curve_score - SPEED_CURVE_START) * SPEED_CURVE_K;
-    }
-    speed_scale = clamp_f(speed_scale, SPEED_SCALE_MIN, SPEED_SCALE_MAX);
-
-    if (camera_confidence < LOW_CONF_TH)
-    {
-        speed_scale *= LOW_CONF_SPEED_SCALE;
-        speed_scale = clamp_f(speed_scale, SPEED_SCALE_MIN, SPEED_SCALE_MAX);
-    }
-
-    target_pulses_expect = (int)((float)base_pulses * speed_scale);
-    if (target_pulses_expect < 0) target_pulses_expect = 0;
-
-    if (!speed_filter_init)
-    {
-        target_pulses_smooth = (float)target_pulses_expect;
-        speed_filter_init = 1;
-    }
-    else
-    {
-        if ((float)target_pulses_expect > target_pulses_smooth)
-        {
-            speed_alpha = SPEED_ACCEL_UP_ALPHA;
-        }
-        else
-        {
-            speed_alpha = SPEED_ACCEL_DOWN_ALPHA;
-        }
-        target_pulses_smooth += ((float)target_pulses_expect - target_pulses_smooth) * speed_alpha;
-    }
-
-    target_pulses = (int)target_pulses_smooth;
-    if (target_pulses < 0) target_pulses = 0;
-
+    steer_out_last = steer_out;
     abs_steer = abs_f(steer_out);
-    diff_speed = 0;
-    if (abs_steer > DIFF_STEER_DEADBAND)
+    abs_steer_deg = abs_steer / SERVO_DUTY_PER_DEGREE;
+
+    servo_set_duty(SERVO_DUTY_CENTER - steer_out);
+
+    base_pulses = target_speed_base;
+    if (base_pulses < SPEED_TARGET_MIN) base_pulses = SPEED_TARGET_MIN;
+    if (base_pulses > SPEED_TARGET_MAX) base_pulses = SPEED_TARGET_MAX;
+    base_pulses = (int)((float)base_pulses * BASE_SPEED_MATCH_GAIN);
+    curve_min_pulses = target_speed_curve_min;
+    if (curve_min_pulses < SPEED_TARGET_MIN) curve_min_pulses = SPEED_TARGET_MIN;
+    if (curve_min_pulses > base_pulses) curve_min_pulses = base_pulses;
+
+    steer_limit = steer_limit_for_side(steer_out);
+    if (steer_limit < 1.0f) steer_limit = 1.0f;
+    curve_ratio = abs_steer / steer_limit;
+    if (curve_ratio > 1.0f) curve_ratio = 1.0f;
+    target_pulses = base_pulses - (int)((float)(base_pulses - curve_min_pulses) * curve_ratio);
+    if (target_pulses < 0) target_pulses = 0;
+    speed_scale_x100 = 100;
+    if (base_pulses > 0)
     {
-        steer_limit = steer_limit_for_side(steer_out);
-        if (steer_limit < 1.0f) steer_limit = 1.0f;
-        diff_speed = (int)((float)target_pulses * DIFF_MAX_RATIO * (abs_steer / steer_limit));
-        if (diff_speed > (int)((float)target_pulses * DIFF_MAX_RATIO))
-        {
-            diff_speed = (int)((float)target_pulses * DIFF_MAX_RATIO);
-        }
+        speed_scale_x100 = (target_pulses * 100) / base_pulses;
     }
 
-    if (steer_out > 0.0f)
+//    diff_speed = 0;
+//    if (abs_steer_deg > DIFF_STEER_DEADBAND)
+//    {
+//        diff_speed = (int)((float)target_pulses * DIFF_MAX_RATIO * (abs_steer / steer_limit));
+//        if (diff_speed > (int)((float)target_pulses * DIFF_MAX_RATIO))
+//        {
+//            diff_speed = (int)((float)target_pulses * DIFF_MAX_RATIO);
+//        }
+//    }
+
+//    if (steer_out > 0.0f)
+//    {
+//        left_target_pulses = target_pulses - diff_speed;
+//        right_target_pulses = target_pulses + diff_speed;
+//    }
+//    else if (steer_out < 0.0f)
+//    {
+//        left_target_pulses = target_pulses + diff_speed;
+//        right_target_pulses = target_pulses - diff_speed;
+//    }
+//    else
+//    {
+//        left_target_pulses = target_pulses;
+//        right_target_pulses = target_pulses;
+//    }
+// 1. 根据当前实际舵角占比，计算内外轮的差速增量
+    if (abs_steer_deg > DIFF_STEER_DEADBAND)
     {
-        left_target_pulses = target_pulses + diff_speed;
-        right_target_pulses = target_pulses - diff_speed;
+        float steer_ratio = abs_steer / steer_limit;
+        if (steer_ratio > 1.0f) steer_ratio = 1.0f; // 限制最大比例为1
+
+        // 分别计算内轮应该减多少，外轮应该加多少
+        diff_speed_inner = (int)((float)target_pulses * DIFF_RATIO_INNER * steer_ratio);
+        diff_speed_outer = (int)((float)target_pulses * DIFF_RATIO_OUTER * steer_ratio);
     }
-    else if (steer_out < 0.0f)
+
+    // 2. 根据转弯方向，分配给左右轮
+    if (steer_out > 0.0f) // 左转 (左轮是内轮，右轮是外轮)
     {
-        left_target_pulses = target_pulses - diff_speed;
-        right_target_pulses = target_pulses + diff_speed;
+        left_target_pulses = target_pulses - diff_speed_inner;   // 内轮大减速
+        right_target_pulses = target_pulses + diff_speed_outer;  // 外轮小加速
     }
-    else
+    else if (steer_out < 0.0f) // 右转 (右轮是内轮，左轮是外轮)
+    {
+        left_target_pulses = target_pulses + diff_speed_outer;   // 外轮小加速
+        right_target_pulses = target_pulses - diff_speed_inner;  // 内轮大减速
+    }
+    else // 直行
     {
         left_target_pulses = target_pulses;
         right_target_pulses = target_pulses;
@@ -228,12 +301,46 @@ void control_loop(void)
     encoder_update();
     left_motor_speed_pid_calc(left_target_pulses, left_speed);
     right_motor_speed_pid_calc(right_target_pulses, right_speed);
+
     set_motor_speed((int)left_motor_speedpid.output, (int)right_motor_speedpid.output);
 
-    loop_cnt++;
-    if (loop_cnt >= 5)
-    {
-        loop_cnt = 0;
-        print_flag = 1;
-    }
+    control_debug_preview_raw = (int16)preview_raw;
+    control_debug_near_bias_raw = (int16)bias_raw;
+    control_debug_used_bias_x10 = (int16)(error * 10.0f);
+    control_debug_preview_filtered_x10 = (int16)(error * 10.0f);
+    control_debug_preview_far_raw = (int16)preview_far_raw;
+    control_debug_curve_raw = (int16)curve_raw;
+    control_debug_steer_p_x100 = (int16)(steer_p_term * 100.0f);
+    control_debug_steer_kp2_x100 = (int16)(steer_kp2_term * 100.0f);
+    control_debug_steer_ff_x100 = (int16)(steer_gyro_term * 100.0f);
+    control_debug_steer_out_x100 = (int16)(steer_out * 100.0f);
+    control_debug_left_target = (int16)left_target_pulses;
+    control_debug_right_target = (int16)right_target_pulses;
+    control_debug_left_speed = left_speed;
+    control_debug_right_speed = right_speed;
+    control_debug_diff_speed = (int16)diff_speed;
+    control_debug_left_pwm = (int16)left_motor_speedpid.output;
+    control_debug_right_pwm = (int16)right_motor_speedpid.output;
+    control_debug_camera_confidence = camera_confidence;
+    control_debug_valid_line_cnt = camera_valid_line_cnt;
+    control_debug_lost_left_cnt = camera_lost_left_cnt;
+    control_debug_lost_right_cnt = camera_lost_right_cnt;
+    control_debug_curve_exit_hold_cnt = 0;
+    control_debug_speed_scale_x100 = (int16)speed_scale_x100;
+    control_debug_route_mode = camera_route_mode;
+    control_debug_cross_state = camera_cross_state;
+    control_debug_cross_left_open_cnt = camera_debug_width_80;
+		control_debug_cross_right_open_cnt = camera_debug_width_60;
+		control_debug_cross_both_open_cnt = camera_debug_mid_60;
+    control_debug_left_control = camera_debug_left_control;
+    control_debug_right_control = camera_debug_right_control;
+    control_debug_mid_control = camera_debug_mid_control;
+    control_debug_ring_midpoint = camera_debug_ring_midpoint;
+    control_debug_ring_mid_under = camera_debug_ring_mid_under;
+    control_debug_ring_left115 = camera_debug_left_80;
+		control_debug_ring_left85 = camera_debug_right_80;
+		control_debug_ring_left55 = camera_debug_mid_80;
+		shoot_task_5ms();
+
+    print_flag = 1;
 }

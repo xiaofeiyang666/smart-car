@@ -884,6 +884,46 @@
               <FileType>5</FileType>
               <FilePath>..\code\camera.h</FilePath>
             </File>
+            <File>
+              <FileName>vision.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\vision.c</FilePath>
+            </File>
+            <File>
+              <FileName>vision.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\vision.h</FilePath>
+            </File>
+            <File>
+              <FileName>roundabout.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\roundabout.c</FilePath>
+            </File>
+            <File>
+              <FileName>roundabout.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\roundabout.h</FilePath>
+            </File>
+            <File>
+              <FileName>Target_Ring.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Target_Ring.h</FilePath>
+            </File>
+            <File>
+              <FileName>Target_Ring.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Target_Ring.c</FilePath>
+            </File>
+            <File>
+              <FileName>shoot.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\shoot.c</FilePath>
+            </File>
+            <File>
+              <FileName>shoot.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\shoot.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

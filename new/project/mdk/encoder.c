@@ -1,68 +1,68 @@
 #include "encoder.h"
-#include <stdlib.h> // ĞèÒªÓÃµ½ abs() ¾ø¶ÔÖµº¯Êı
+#include <stdlib.h> // éœ€è¦ç”¨åˆ° abs() ç»å¯¹å€¼å‡½æ•°
 
-//ÓÃÓÚ¸øÉãÏñÍ·Ëã·¨ÀÛ¼ÆĞĞÊ»¾àÀëµÄÈ«¾Ö±äÁ¿
+// ç´¯è®¡å·¦å³è½®å¹³å‡è„‰å†²ï¼ŒDistance_Measure è¯»å–åæ¸…é›¶
 volatile int32 accumulated_distance = 0;
 
-// ±àÂëÆ÷Òı½Å¶¨Òå
-#define ENCODER_QUAD_1      ( PWMA_ENCODER )            
-#define ENCODER_QUAD_1_CHA  ( PWMA_ENCODER_CH1P_P60 )   
-#define ENCODER_QUAD_1_CHB  ( PWMA_ENCODER_CH2P_P62 )   
+// ç¼–ç å™¨ 1 ç¡¬ä»¶é€šé“å’Œ A/B ç›¸å¼•è„š
+#define ENCODER_QUAD_1      ( PWMA_ENCODER )
+#define ENCODER_QUAD_1_CHA  ( PWMA_ENCODER_CH1P_P60 )
+#define ENCODER_QUAD_1_CHB  ( PWMA_ENCODER_CH2P_P62 )
 
-#define ENCODER_QUAD_2      ( PWMC_ENCODER )            
-#define ENCODER_QUAD_2_CHA  ( PWMC_ENCODER_CH1P_P40 )   
-#define ENCODER_QUAD_2_CHB  ( PWMC_ENCODER_CH2P_P42 )   
+// ç¼–ç å™¨ 2 ç¡¬ä»¶é€šé“å’Œ A/B ç›¸å¼•è„š
+#define ENCODER_QUAD_2      ( PWMC_ENCODER )
+#define ENCODER_QUAD_2_CHA  ( PWMC_ENCODER_CH1P_P40 )
+#define ENCODER_QUAD_2_CHB  ( PWMC_ENCODER_CH2P_P42 )
 
-// ÕæÕı¶¨ÒåÕâÁ½¸öËÙ¶È±äÁ¿µÄµØ·½
-int16 left_speed = 0;
-int16 right_speed = 0;
-int16 left_speed_raw = 0;
-int16 right_speed_raw = 0;
+int16 left_speed = 0;       // å·¦è½®é€Ÿåº¦åé¦ˆï¼Œå•ä½ä¸ºæœ¬å‘¨æœŸç¼–ç å™¨è„‰å†²
+int16 right_speed = 0;      // å³è½®é€Ÿåº¦åé¦ˆï¼Œå•ä½ä¸ºæœ¬å‘¨æœŸç¼–ç å™¨è„‰å†²
+int16 left_speed_raw = 0;   // å·¦è½®åŸå§‹è„‰å†²ï¼Œå·²æŒ‰å½“å‰æ¥çº¿æ˜ å°„åˆ°å·¦è½®
+int16 right_speed_raw = 0;  // å³è½®åŸå§‹è„‰å†²ï¼Œå³ä¾§å–è´Ÿç”¨äºç»Ÿä¸€å‰è¿›æ–¹å‘
 
-// ±àÂëÆ÷³õÊ¼»¯º¯Êı
+// åˆå§‹åŒ–å·¦å³è½®æ­£äº¤ç¼–ç å™¨è¾“å…¥
 void encoder_init(void)
 {
-    encoder_quad_init(ENCODER_QUAD_1, ENCODER_QUAD_1_CHA, ENCODER_QUAD_1_CHB); 
-    encoder_quad_init(ENCODER_QUAD_2, ENCODER_QUAD_2_CHA, ENCODER_QUAD_2_CHB); 
+    encoder_quad_init(ENCODER_QUAD_1, ENCODER_QUAD_1_CHA, ENCODER_QUAD_1_CHB);
+    encoder_quad_init(ENCODER_QUAD_2, ENCODER_QUAD_2_CHA, ENCODER_QUAD_2_CHB);
 }
 
-// ËÙ¶È¸üĞÂº¯Êı£¨Ó¦¸ÃÔÚ¶¨Ê±Æ÷ÖĞ¶ÏÖĞ±»µ÷ÓÃ£©
+// è¯»å–å¹¶æ¸…ç©ºæœ¬å‘¨æœŸç¼–ç å™¨è®¡æ•°ï¼Œé€šå¸¸ç”±æ§åˆ¶ç¯å‘¨æœŸæ€§è°ƒç”¨
 void encoder_update(void)
 {
-    left_speed_raw  = encoder_get_count(ENCODER_QUAD_1); // ¶ÁÈ¡²¢ĞŞÕı×ó²à·½Ïò
-    right_speed_raw = -encoder_get_count(ENCODER_QUAD_2);
+    left_speed_raw  = encoder_get_count(ENCODER_QUAD_2); // è¯»å–å¹¶ä¿®æ­£å·¦ä¾§æ–¹å‘
+    right_speed_raw = -encoder_get_count(ENCODER_QUAD_1);
 		left_speed = 	left_speed_raw;
 		right_speed = right_speed_raw;
-	
+
 		accumulated_distance += (abs(left_speed_raw) + abs(right_speed_raw)) / 2;
 
-    encoder_clear_count(ENCODER_QUAD_1); // Çå¿Õ¼ÆÊı
-    encoder_clear_count(ENCODER_QUAD_2); 
+    encoder_clear_count(ENCODER_QUAD_1); // æ¸…ç©ºè®¡æ•°
+    encoder_clear_count(ENCODER_QUAD_2);
 }
 
 int16 Distance_Measure(void)
 {
     int16 dist = accumulated_distance;
-    accumulated_distance = 0; // ¶ÁÍêºóÇåÁã£¬Ïàµ±ÓÚ²âÁ¿Á½´Îµ÷ÓÃÖ®¼äµÄ¾àÀë
+    accumulated_distance = 0; // è¯»å®Œåæ¸…é›¶ï¼Œç›¸å½“äºæµ‹é‡ä¸¤æ¬¡è°ƒç”¨ä¹‹é—´çš„è·ç¦»
     return dist;
 }
 
 //#include "encoder.h"
-//#include <stdlib.h> // ĞèÒªÓÃµ½ abs()
+//#include <stdlib.h> // éœ€è¦ç”¨åˆ° abs()
 
 //volatile int32 accumulated_distance = 0;
 
-//// ¡¾ĞÂÔö¡¿¸ù¾İÄãÊµ²âµÄÊı¾İ£¬¶¨Òå×î´óÂö³åÊı
-//#define MAX_SPEED_PULSES 2000  
+//// ã€æ–°å¢ã€‘æ ¹æ®ä½ å®æµ‹çš„æ•°æ®ï¼Œå®šä¹‰æœ€å¤§è„‰å†²æ•°
+//#define MAX_SPEED_PULSES 2000
 
-//// ±àÂëÆ÷Òı½Å¶¨Òå (±£³ÖÄãµÄÔ­Ñù)
-//#define ENCODER_QUAD_1      ( PWMA_ENCODER )            
-//#define ENCODER_QUAD_1_CHA  ( PWMA_ENCODER_CH1P_P60 )   
-//#define ENCODER_QUAD_1_CHB  ( PWMA_ENCODER_CH2P_P62 )   
+//// ç¼–ç å™¨å¼•è„šå®šä¹‰ (ä¿æŒä½ çš„åŸæ ·)
+//#define ENCODER_QUAD_1      ( PWMA_ENCODER )
+//#define ENCODER_QUAD_1_CHA  ( PWMA_ENCODER_CH1P_P60 )
+//#define ENCODER_QUAD_1_CHB  ( PWMA_ENCODER_CH2P_P62 )
 
-//#define ENCODER_QUAD_2      ( PWMC_ENCODER )            
-//#define ENCODER_QUAD_2_CHA  ( PWMC_ENCODER_CH1P_P40 )   
-//#define ENCODER_QUAD_2_CHB  ( PWMC_ENCODER_CH2P_P42 )   
+//#define ENCODER_QUAD_2      ( PWMC_ENCODER )
+//#define ENCODER_QUAD_2_CHA  ( PWMC_ENCODER_CH1P_P40 )
+//#define ENCODER_QUAD_2_CHB  ( PWMC_ENCODER_CH2P_P42 )
 
 //int16 left_speed = 0;
 //int16 right_speed = 0;
@@ -71,30 +71,30 @@ int16 Distance_Measure(void)
 
 //void encoder_init(void)
 //{
-//    encoder_quad_init(ENCODER_QUAD_1, ENCODER_QUAD_1_CHA, ENCODER_QUAD_1_CHB); 
-//    encoder_quad_init(ENCODER_QUAD_2, ENCODER_QUAD_2_CHA, ENCODER_QUAD_2_CHB); 
+//    encoder_quad_init(ENCODER_QUAD_1, ENCODER_QUAD_1_CHA, ENCODER_QUAD_1_CHB);
+//    encoder_quad_init(ENCODER_QUAD_2, ENCODER_QUAD_2_CHA, ENCODER_QUAD_2_CHB);
 //}
 
 //void encoder_update(void)
 //{
-//    left_speed_raw  = encoder_get_count(ENCODER_QUAD_1); 
+//    left_speed_raw  = encoder_get_count(ENCODER_QUAD_1);
 //    right_speed_raw = -encoder_get_count(ENCODER_QUAD_2);
-//    
-//    // ¡¾ºËĞÄĞŞ¸Ä¡¿½«Ô­Ê¼Âö³åÓ³Éäµ½ 0~90£¡
-//    // Ç¿ÖÆ×ª»»Îª long ½øĞĞÔËËã£¬·ÀÖ¹³Ë·¨Òç³ö£¬ËãÍêÔÙ×ª»Ø int16
+//
+//    // ã€æ ¸å¿ƒä¿®æ”¹ã€‘å°†åŸå§‹è„‰å†²æ˜ å°„åˆ° 0~90ï¼
+//    // å¼ºåˆ¶è½¬æ¢ä¸º long è¿›è¡Œè¿ç®—ï¼Œé˜²æ­¢ä¹˜æ³•æº¢å‡ºï¼Œç®—å®Œå†è½¬å› int16
 //    left_speed = (int16)(((long)left_speed_raw * 90) / MAX_SPEED_PULSES);
 //    right_speed = (int16)(((long)right_speed_raw * 90) / MAX_SPEED_PULSES);
-//    
-//    // ÀÛ¼Ó¾àÀë»¹ÊÇÓÃÔ­Ê¼Âö³å±È½ÏºÃ£¬¾«¶È¸ß
+//
+//    // ç´¯åŠ è·ç¦»è¿˜æ˜¯ç”¨åŸå§‹è„‰å†²æ¯”è¾ƒå¥½ï¼Œç²¾åº¦é«˜
 //    accumulated_distance += (abs(left_speed_raw) + abs(right_speed_raw)) / 2;
 
-//    encoder_clear_count(ENCODER_QUAD_1); 
-//    encoder_clear_count(ENCODER_QUAD_2); 
+//    encoder_clear_count(ENCODER_QUAD_1);
+//    encoder_clear_count(ENCODER_QUAD_2);
 //}
 
 //int16 Distance_Measure(void)
 //{
 //    int16 dist = accumulated_distance;
-//    accumulated_distance = 0; 
+//    accumulated_distance = 0;
 //    return dist;
 //}

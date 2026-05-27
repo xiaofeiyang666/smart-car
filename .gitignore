@@ -1,0 +1,33 @@
+# Extracted/reference files
+pdf_extracted_text_try.txt
+pdf_stream_snippets.txt
+reference/
+new/Êý¾Ý¼¯/
+
+# Personal notes, optional
+# *.docx
+
+# Manual backups
+new/project/backup/
+*.bak*
+*backup*
+*.tmp.txt
+*_snapshot.tmp.txt
+*_numbered.tmp.txt
+
+# Keil/MDK generated output
+new/project/mdk/out_file/
+*.obj
+*.lst
+*.crf
+*.__i
+*.map
+*.hex
+*.lnp
+*.log
+*.htm
+
+# Keil user/local IDE state
+*.uvgui.*
+*.uvgui_*
+*.uvguix.*

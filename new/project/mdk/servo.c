@@ -1,22 +1,44 @@
 #include "servo.h"
 
-// 舵机初始化
+volatile uint32 servo_pwm_output = 0;
+
+static float servo_clamp_duty(float duty)
+{
+    float min_duty;
+    float max_duty;
+
+    if (SERVO_DUTY_L_MAX < SERVO_DUTY_R_MAX)
+    {
+        min_duty = SERVO_DUTY_L_MAX;
+        max_duty = SERVO_DUTY_R_MAX;
+    }
+    else
+    {
+        min_duty = SERVO_DUTY_R_MAX;
+        max_duty = SERVO_DUTY_L_MAX;
+    }
+
+    if (duty < min_duty) duty = min_duty;
+    if (duty > max_duty) duty = max_duty;
+    return duty;
+}
+
 void servo_init(void)
 {
-    // 初始化 PWM 引脚，初始占空比给 0，防止上电乱抽
-    pwm_init(SERVO_PWM_PIN, SERVO_FREQ, 0); 
-    
-    // 初始化完成后，先让舵机回到中位
+    pwm_init(SERVO_PWM_PIN, SERVO_FREQ, 0);
     servo_set_angle(SERVO_CENTER);
 }
 
-// 舵机角度控制函数 (带限幅保护)
 void servo_set_angle(float angle)
 {
-    // 软件限幅，防止打角过大损坏机械拉杆或烧毁舵机
-    if(angle > SERVO_R_MAX) angle = SERVO_R_MAX;
-    if(angle < SERVO_L_MAX) angle = SERVO_L_MAX;
-    
-    // 计算并输出对应角度的 PWM 占空比
-    pwm_set_duty(SERVO_PWM_PIN, (uint32)SERVO_DUTY(angle));
+    if (angle > SERVO_R_MAX) angle = SERVO_R_MAX;
+    if (angle < SERVO_L_MAX) angle = SERVO_L_MAX;
+    servo_set_duty(SERVO_DUTY(angle));
+}
+
+void servo_set_duty(float duty)
+{
+    duty = servo_clamp_duty(duty);
+    servo_pwm_output = (uint32)duty;
+    pwm_set_duty(SERVO_PWM_PIN, servo_pwm_output);
 }
