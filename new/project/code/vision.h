@@ -13,7 +13,7 @@
 #define VISION_IMAGE_W              MT9V03X_W
 #define VISION_IMAGE_H              MT9V03X_H
 #define VISION_MID_COL              94
-#define VISION_CONTROL_ROW          80
+#define VISION_CONTROL_ROW          78
 
 /* ===================== 灰度搜线参数 =====================
  * VISION_BLACK_POINT 是最低黑点阈值保护。
@@ -71,6 +71,8 @@ extern uint8 vision_debug_ring_mid_under;
 extern uint8 vision_debug_ring_left115;
 extern uint8 vision_debug_ring_left85;
 extern uint8 vision_debug_ring_left55;
+extern uint8 vision_debug_ring_premeet;
+extern uint8 vision_debug_ring_candidate;
 extern uint8 vision_debug_left_80;
 extern uint8 vision_debug_right_80;
 extern uint8 vision_debug_mid_80;

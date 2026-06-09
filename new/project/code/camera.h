@@ -42,6 +42,8 @@ extern uint8 camera_debug_ring_mid_under;
 extern uint8 camera_debug_ring_left115;
 extern uint8 camera_debug_ring_left85;
 extern uint8 camera_debug_ring_left55;
+extern uint8 camera_debug_ring_premeet;
+extern uint8 camera_debug_ring_candidate;
 extern uint8 camera_debug_left_80;
 extern uint8 camera_debug_right_80;
 extern uint8 camera_debug_mid_80;

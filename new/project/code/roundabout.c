@@ -29,6 +29,9 @@ uint8 roundabout_debug_left_115 = 0;
 uint8 roundabout_debug_left_85 = 0;
 uint8 roundabout_debug_left_55 = 0;
 
+uint8 roundabout_debug_premeet = 0;
+uint8 roundabout_debug_candidate_count = 0;
+
 
 static int abs_i(int x)
 {
@@ -58,6 +61,7 @@ void Ring(void)
         {
             current_step = 1;
         }
+				break;
     case 1:
         Ring_First_meeting();
         if (first_meeting_flag)
@@ -116,6 +120,9 @@ void Ring(void)
     roundabout_debug_left_115 = vision_left_edge_line[115];
     roundabout_debug_left_85 = vision_left_edge_line[85];
     roundabout_debug_left_55 = vision_left_edge_line[55];
+		
+		roundabout_debug_premeet = ring_preMeet_flag;
+		roundabout_debug_candidate_count = 0;
 }
 
 void draw_line(uint8 left_point, uint8 right_point, uint8 to_flag)

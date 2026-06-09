@@ -2,7 +2,7 @@
 #include <string.h>
 #include "Target_Ring.h"
 
-#define CAMERA_DEBUG_DRAW_ENABLE   1
+#define CAMERA_DEBUG_DRAW_ENABLE   0
 
 uint8 img_threshold = 120;
 uint8 left_jidian = 1;
@@ -35,6 +35,8 @@ uint8 camera_debug_ring_mid_under = 0;
 uint8 camera_debug_ring_left115 = 0;
 uint8 camera_debug_ring_left85 = 0;
 uint8 camera_debug_ring_left55 = 0;
+uint8 camera_debug_ring_premeet = 0;
+uint8 camera_debug_ring_candidate = 0;
 uint8 camera_debug_left_80 = 0;
 uint8 camera_debug_right_80 = 0;
 uint8 camera_debug_mid_80 = MID_W;
@@ -84,6 +86,8 @@ static void camera_publish_vision(void)
     camera_debug_ring_left115 = vision_debug_ring_left115;
     camera_debug_ring_left85 = vision_debug_ring_left85;
     camera_debug_ring_left55 = vision_debug_ring_left55;
+    camera_debug_ring_premeet = vision_debug_ring_premeet;
+    camera_debug_ring_candidate = vision_debug_ring_candidate;
 		camera_debug_left_80 = vision_debug_left_80;
 		camera_debug_right_80 = vision_debug_right_80;
 		camera_debug_mid_80 = vision_debug_mid_80;

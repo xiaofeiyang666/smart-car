@@ -33,6 +33,8 @@ extern uint8 roundabout_debug_mid_under_flag;
 extern uint8 roundabout_debug_left_115;
 extern uint8 roundabout_debug_left_85;
 extern uint8 roundabout_debug_left_55;
+extern uint8 roundabout_debug_premeet;
+extern uint8 roundabout_debug_candidate_count;
 
 extern uint8 key_anlysis1;
 extern uint8 key_anlysis2;

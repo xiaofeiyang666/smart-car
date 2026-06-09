@@ -35,7 +35,7 @@ void PID_Calc(PID *pid, int reference, int feedback)
             pid->kd * (pid->error - 2.0f * pid->lastError + pid->prevError);
 
     pid->output += delta;
-    pid->output = pid_limit(pid->output, 0.0f, pid->maxOutput);
+    pid->output = pid_limit(pid->output, -50.0f, pid->maxOutput);
 
     pid->prevError = pid->lastError;
     pid->lastError = pid->error;

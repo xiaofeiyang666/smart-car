@@ -21,6 +21,9 @@
 #define SPEED_TARGET_MAX          900
 #define BASE_SPEED_MATCH_GAIN     1.00f
 #define CURVE_SPEED_MIN_DEFAULT   75
+#define SHOOT_APPROACH_SPEED      10
+#define SHOOT_REVERSE_PWM         16
+#define SHOOT_FORWARD_PWM         12
 
 /* ===================== 舵机输出参数 =====================
  * SERVO_OUT_LIMIT_LEFT/RIGHT 由 servo.h 的机械限幅自动换算而来。
@@ -34,8 +37,8 @@
  */
 #define SERVO_OUT_LIMIT_LEFT      (SERVO_DUTY_CENTER - SERVO_DUTY_L_MAX)
 #define SERVO_OUT_LIMIT_RIGHT     (SERVO_DUTY_R_MAX - SERVO_DUTY_CENTER)
-#define SERVO_DEADBAND_PIX        2.0f
-#define SERVO_DUTY_STEP_DEG       5.0f
+#define SERVO_DEADBAND_PIX        3.0f
+#define SERVO_DUTY_STEP_DEG       5.5f
 #define STEER_OUT_STEP            (SERVO_DUTY_PER_DEGREE * SERVO_DUTY_STEP_DEG)
 #define GYRO_STEER_LIMIT_DEG      2.5f
 #define GYRO_STEER_LIMIT          (SERVO_DUTY_PER_DEGREE * GYRO_STEER_LIMIT_DEG)
@@ -97,14 +100,14 @@ volatile uint8 control_debug_ring_left85 = 0;
 volatile uint8 control_debug_ring_left55 = 0;
 
 /* 基础速度目标，单位：5ms 编码器计数。调高速主要改这里。 */
-int target_speed_base = 90;
+int target_speed_base = 100;
 /* 弯道最低速度目标。base 提到 100/120 后，可先保持 80。 */
 int target_speed_curve_min = CURVE_SPEED_MIN_DEFAULT;
 
 /* 舵机一次项增益：越大越灵敏，过大表现为 steer_out 经常打到限幅。 */
 float servo_kp = 2.5f;
 /* 舵机二次项增益：大误差时额外加舵，小误差影响小；过大容易入弯突然打死。 */
-float servo_kp2 = 0.01f;
+float servo_kp2 = 0.013f;
 /* 陀螺阻尼增益：imu660ra_gyro_z > 0 为右转，当前公式用正 kg 抑制车头转动。 */
 float servo_kg = 0.002f;
 
@@ -170,7 +173,7 @@ void control_loop(void)
     int base_pulses;
     int curve_min_pulses;
     int target_pulses;
-    int diff_speed;
+    int diff_speed = 0;
     int left_target_pulses;
     int right_target_pulses;
     int speed_scale_x100;
@@ -187,7 +190,8 @@ void control_loop(void)
     preview_far_raw = clamp_i((int)camera_preview_far_raw, -90, 90);
     curve_raw = clamp_i((int)camera_curve_raw, -90, 90);
 
-    error = (float)preview_raw;
+    //error = (float)preview_raw;
+		error = (float)preview_raw * 0.90f + (float)preview_far_raw * 0.10f;
     if ((error <= SERVO_DEADBAND_PIX) && (error >= -SERVO_DEADBAND_PIX))
     {
         error = 0.0f;
@@ -236,6 +240,16 @@ void control_loop(void)
     if (curve_ratio > 1.0f) curve_ratio = 1.0f;
     target_pulses = base_pulses - (int)((float)(base_pulses - curve_min_pulses) * curve_ratio);
     if (target_pulses < 0) target_pulses = 0;
+
+    if (shoot_stop_request)
+    {
+        target_pulses = 0;
+    }
+    else if (shoot_slow_request && target_pulses > SHOOT_APPROACH_SPEED)
+    {
+        target_pulses = SHOOT_APPROACH_SPEED;
+    }
+
     speed_scale_x100 = 100;
     if (base_pulses > 0)
     {
@@ -279,12 +293,12 @@ void control_loop(void)
     }
 
     // 2. 根据转弯方向，分配给左右轮
-    if (steer_out > 0.0f) // 左转 (左轮是内轮，右轮是外轮)
+    if (steer_out < 0.0f) // 左转 (左轮是内轮，右轮是外轮)
     {
         left_target_pulses = target_pulses - diff_speed_inner;   // 内轮大减速
         right_target_pulses = target_pulses + diff_speed_outer;  // 外轮小加速
     }
-    else if (steer_out < 0.0f) // 右转 (右轮是内轮，左轮是外轮)
+    else if (steer_out > 0.0f) // 右转 (右轮是内轮，左轮是外轮)
     {
         left_target_pulses = target_pulses + diff_speed_outer;   // 外轮小加速
         right_target_pulses = target_pulses - diff_speed_inner;  // 内轮大减速
@@ -299,6 +313,168 @@ void control_loop(void)
     if (right_target_pulses < 0) right_target_pulses = 0;
 
     encoder_update();
+
+    if (shoot_reverse_request)
+    {
+        left_motor_speedpid.error = 0;
+        left_motor_speedpid.lastError = 0;
+        left_motor_speedpid.prevError = 0;
+        left_motor_speedpid.output = 0;
+        right_motor_speedpid.error = 0;
+        right_motor_speedpid.lastError = 0;
+        right_motor_speedpid.prevError = 0;
+        right_motor_speedpid.output = 0;
+        servo_set_angle(SERVO_CENTER);
+        set_motor_speed(-SHOOT_REVERSE_PWM, -SHOOT_REVERSE_PWM);
+
+        control_debug_preview_raw = (int16)preview_raw;
+        control_debug_near_bias_raw = (int16)bias_raw;
+        control_debug_used_bias_x10 = (int16)(error * 10.0f);
+        control_debug_preview_filtered_x10 = (int16)(error * 10.0f);
+        control_debug_preview_far_raw = (int16)preview_far_raw;
+        control_debug_curve_raw = (int16)curve_raw;
+        control_debug_steer_p_x100 = 0;
+        control_debug_steer_kp2_x100 = 0;
+        control_debug_steer_ff_x100 = 0;
+        control_debug_steer_out_x100 = 0;
+        control_debug_left_target = -SHOOT_REVERSE_PWM;
+        control_debug_right_target = -SHOOT_REVERSE_PWM;
+        control_debug_left_speed = left_speed;
+        control_debug_right_speed = right_speed;
+        control_debug_diff_speed = 0;
+        control_debug_left_pwm = -SHOOT_REVERSE_PWM;
+        control_debug_right_pwm = -SHOOT_REVERSE_PWM;
+        control_debug_camera_confidence = camera_confidence;
+        control_debug_valid_line_cnt = camera_valid_line_cnt;
+        control_debug_lost_left_cnt = camera_lost_left_cnt;
+        control_debug_lost_right_cnt = camera_lost_right_cnt;
+        control_debug_curve_exit_hold_cnt = 0;
+        control_debug_speed_scale_x100 = 0;
+        control_debug_route_mode = camera_route_mode;
+        control_debug_cross_state = camera_cross_state;
+        control_debug_cross_left_open_cnt = camera_debug_width_80;
+        control_debug_cross_right_open_cnt = camera_debug_width_60;
+        control_debug_cross_both_open_cnt = camera_debug_mid_60;
+        control_debug_left_control = camera_debug_left_control;
+        control_debug_right_control = camera_debug_right_control;
+        control_debug_mid_control = camera_debug_mid_control;
+        control_debug_ring_midpoint = camera_debug_ring_midpoint;
+        control_debug_ring_mid_under = camera_debug_ring_mid_under;
+        control_debug_ring_left115 = camera_debug_ring_left115;
+        control_debug_ring_left85 = camera_debug_ring_left85;
+        control_debug_ring_left55 = camera_debug_ring_left55;
+        shoot_task_5ms();
+        print_flag = 1;
+        return;
+    }
+
+    if (shoot_forward_request)
+    {
+        left_motor_speedpid.error = 0;
+        left_motor_speedpid.lastError = 0;
+        left_motor_speedpid.prevError = 0;
+        left_motor_speedpid.output = 0;
+        right_motor_speedpid.error = 0;
+        right_motor_speedpid.lastError = 0;
+        right_motor_speedpid.prevError = 0;
+        right_motor_speedpid.output = 0;
+        servo_set_angle(SERVO_CENTER);
+        set_motor_speed(SHOOT_FORWARD_PWM, SHOOT_FORWARD_PWM);
+
+        control_debug_preview_raw = (int16)preview_raw;
+        control_debug_near_bias_raw = (int16)bias_raw;
+        control_debug_used_bias_x10 = (int16)(error * 10.0f);
+        control_debug_preview_filtered_x10 = (int16)(error * 10.0f);
+        control_debug_preview_far_raw = (int16)preview_far_raw;
+        control_debug_curve_raw = (int16)curve_raw;
+        control_debug_steer_p_x100 = 0;
+        control_debug_steer_kp2_x100 = 0;
+        control_debug_steer_ff_x100 = 0;
+        control_debug_steer_out_x100 = 0;
+        control_debug_left_target = SHOOT_FORWARD_PWM;
+        control_debug_right_target = SHOOT_FORWARD_PWM;
+        control_debug_left_speed = left_speed;
+        control_debug_right_speed = right_speed;
+        control_debug_diff_speed = 0;
+        control_debug_left_pwm = SHOOT_FORWARD_PWM;
+        control_debug_right_pwm = SHOOT_FORWARD_PWM;
+        control_debug_camera_confidence = camera_confidence;
+        control_debug_valid_line_cnt = camera_valid_line_cnt;
+        control_debug_lost_left_cnt = camera_lost_left_cnt;
+        control_debug_lost_right_cnt = camera_lost_right_cnt;
+        control_debug_curve_exit_hold_cnt = 0;
+        control_debug_speed_scale_x100 = 0;
+        control_debug_route_mode = camera_route_mode;
+        control_debug_cross_state = camera_cross_state;
+        control_debug_cross_left_open_cnt = camera_debug_width_80;
+        control_debug_cross_right_open_cnt = camera_debug_width_60;
+        control_debug_cross_both_open_cnt = camera_debug_mid_60;
+        control_debug_left_control = camera_debug_left_control;
+        control_debug_right_control = camera_debug_right_control;
+        control_debug_mid_control = camera_debug_mid_control;
+        control_debug_ring_midpoint = camera_debug_ring_midpoint;
+        control_debug_ring_mid_under = camera_debug_ring_mid_under;
+        control_debug_ring_left115 = camera_debug_ring_left115;
+        control_debug_ring_left85 = camera_debug_ring_left85;
+        control_debug_ring_left55 = camera_debug_ring_left55;
+        shoot_task_5ms();
+        print_flag = 1;
+        return;
+    }
+
+    if (shoot_stop_request)
+    {
+        left_motor_speedpid.error = 0;
+        left_motor_speedpid.lastError = 0;
+        left_motor_speedpid.prevError = 0;
+        left_motor_speedpid.output = 0;
+        right_motor_speedpid.error = 0;
+        right_motor_speedpid.lastError = 0;
+        right_motor_speedpid.prevError = 0;
+        right_motor_speedpid.output = 0;
+        set_motor_speed(0, 0);
+
+        control_debug_preview_raw = (int16)preview_raw;
+        control_debug_near_bias_raw = (int16)bias_raw;
+        control_debug_used_bias_x10 = (int16)(error * 10.0f);
+        control_debug_preview_filtered_x10 = (int16)(error * 10.0f);
+        control_debug_preview_far_raw = (int16)preview_far_raw;
+        control_debug_curve_raw = (int16)curve_raw;
+        control_debug_steer_p_x100 = (int16)(steer_p_term * 100.0f);
+        control_debug_steer_kp2_x100 = (int16)(steer_kp2_term * 100.0f);
+        control_debug_steer_ff_x100 = (int16)(steer_gyro_term * 100.0f);
+        control_debug_steer_out_x100 = (int16)(steer_out * 100.0f);
+        control_debug_left_target = 0;
+        control_debug_right_target = 0;
+        control_debug_left_speed = left_speed;
+        control_debug_right_speed = right_speed;
+        control_debug_diff_speed = 0;
+        control_debug_left_pwm = 0;
+        control_debug_right_pwm = 0;
+        control_debug_camera_confidence = camera_confidence;
+        control_debug_valid_line_cnt = camera_valid_line_cnt;
+        control_debug_lost_left_cnt = camera_lost_left_cnt;
+        control_debug_lost_right_cnt = camera_lost_right_cnt;
+        control_debug_curve_exit_hold_cnt = 0;
+        control_debug_speed_scale_x100 = 0;
+        control_debug_route_mode = camera_route_mode;
+        control_debug_cross_state = camera_cross_state;
+        control_debug_cross_left_open_cnt = camera_debug_width_80;
+        control_debug_cross_right_open_cnt = camera_debug_width_60;
+        control_debug_cross_both_open_cnt = camera_debug_mid_60;
+        control_debug_left_control = camera_debug_left_control;
+        control_debug_right_control = camera_debug_right_control;
+        control_debug_mid_control = camera_debug_mid_control;
+        control_debug_ring_midpoint = camera_debug_ring_midpoint;
+        control_debug_ring_mid_under = camera_debug_ring_mid_under;
+        control_debug_ring_left115 = camera_debug_ring_left115;
+        control_debug_ring_left85 = camera_debug_ring_left85;
+        control_debug_ring_left55 = camera_debug_ring_left55;
+        shoot_task_5ms();
+        print_flag = 1;
+        return;
+    }
+
     left_motor_speed_pid_calc(left_target_pulses, left_speed);
     right_motor_speed_pid_calc(right_target_pulses, right_speed);
 
@@ -337,9 +513,9 @@ void control_loop(void)
     control_debug_mid_control = camera_debug_mid_control;
     control_debug_ring_midpoint = camera_debug_ring_midpoint;
     control_debug_ring_mid_under = camera_debug_ring_mid_under;
-    control_debug_ring_left115 = camera_debug_left_80;
-		control_debug_ring_left85 = camera_debug_right_80;
-		control_debug_ring_left55 = camera_debug_mid_80;
+    control_debug_ring_left115 = camera_debug_ring_left115;
+		control_debug_ring_left85 = camera_debug_ring_left85;
+		control_debug_ring_left55 = camera_debug_ring_left55;
 		shoot_task_5ms();
 
     print_flag = 1;

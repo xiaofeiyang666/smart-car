@@ -39,6 +39,8 @@ uint8 vision_debug_ring_mid_under = 0;
 uint8 vision_debug_ring_left115 = 0;
 uint8 vision_debug_ring_left85 = 0;
 uint8 vision_debug_ring_left55 = 0;
+uint8 vision_debug_ring_premeet = 0;
+uint8 vision_debug_ring_candidate = 0;
 uint8 vision_debug_left_80 = 0;
 uint8 vision_debug_right_80 = 0;
 uint8 vision_debug_mid_80 = VISION_MID_COL;
@@ -59,13 +61,13 @@ static uint8 p_cross_ring_guard_count = 0;
 
 #define P_CROSS_ROW_MIN             (VISION_CONTROL_ROW - 18)
 #define P_CROSS_ROW_MAX             (VISION_CONTROL_ROW + 22)
-#define P_CROSS_BOTH_OPEN_MIN       18
-#define P_CROSS_SIDE_OPEN_MIN       30
+#define P_CROSS_BOTH_OPEN_MIN       26
+#define P_CROSS_SIDE_OPEN_MIN       40
 #define P_CROSS_HOLD_FRAMES         4
 #define P_CROSS_RING_GUARD_LEFT_OPEN_MIN   30
-#define P_CROSS_RING_GUARD_RIGHT_OPEN_MAX  5
-#define P_CROSS_RING_GUARD_BOTH_OPEN_MAX   5
-#define P_CROSS_RING_GUARD_HOLD_FRAMES     24
+#define P_CROSS_RING_GUARD_RIGHT_OPEN_MAX  16
+#define P_CROSS_RING_GUARD_BOTH_OPEN_MAX   12
+#define P_CROSS_RING_GUARD_HOLD_FRAMES     45
 
 /* P/cross detection only suppresses roundabout takeover; it does not modify control lines. */
 
@@ -601,6 +603,8 @@ static void build_outputs(void)
     vision_debug_ring_left115 = vision_left_edge_line[115];
     vision_debug_ring_left85 = vision_left_edge_line[85];
     vision_debug_ring_left55 = vision_left_edge_line[55];
+    vision_debug_ring_premeet = roundabout_debug_premeet;
+    vision_debug_ring_candidate = roundabout_debug_candidate_count;
 		vision_debug_left_80 = vision_left_control_line[80];
 		vision_debug_right_80 = vision_right_control_line[80];
 		vision_debug_mid_80 = vision_mid_line[80];
@@ -625,7 +629,8 @@ static void build_outputs(void)
 
     vision_confidence = (uint8)conf;
     vision_valid = (vision_confidence >= 20 && vision_valid_line_count >= 12) ? 1 : 0;
-    if (vision_cross_flag)
+//    if (vision_cross_flag)
+		if (vision_cross_flag && roundabout_state == ROUNDABOUT_STATE_NORMAL)
     {
         vision_ring_state = VISION_ROUTE_CROSS;
         vision_ring_dir = ROUNDABOUT_DIR_NONE;
@@ -668,6 +673,8 @@ void vision_init(void)
     vision_debug_ring_left115 = 0;
     vision_debug_ring_left85 = 0;
     vision_debug_ring_left55 = 0;
+    vision_debug_ring_premeet = 0;
+    vision_debug_ring_candidate = 0;
     roundabout_reset();
 }
 
@@ -677,13 +684,21 @@ void vision_process(const uint8 *image)
     search_reference_col(image);
     search_line(image);
     p_cross_detect_only();
-    if (vision_cross_flag)
-    {
-        roundabout_reset();
-    }
-    else
-    {
-        roundabout_process();
-    }
+//    if (vision_cross_flag)
+//    {
+//        roundabout_reset();
+//    }
+//    else
+//    {
+//        roundabout_process();
+//    }
+	if (vision_cross_flag && roundabout_state == ROUNDABOUT_STATE_NORMAL)
+{
+    roundabout_reset();
+}
+else
+{
+    roundabout_process();
+}
     build_outputs();
 }
